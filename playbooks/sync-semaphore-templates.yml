@@ -1,0 +1,77 @@
+---
+- name: Sync Semaphore Templates - Auto-create templates from playbooks
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  
+  vars:
+    semaphore_url: "{{ lookup('env', 'SEMAPHORE_URL') | default('https://ansible.cloudigan.net', true) }}"
+    semaphore_user: "{{ lookup('env', 'SEMAPHORE_USER') | default('admin', true) }}"
+    semaphore_password: "{{ lookup('env', 'SEMAPHORE_PASSWORD') }}"
+    semaphore_project_id: "{{ lookup('env', 'SEMAPHORE_PROJECT_ID') | default('1', true) }}"
+    github_repo: "heybearc/ansible-playbooks"
+    
+  tasks:
+    - name: Verify required variables are set
+      assert:
+        that:
+          - semaphore_password is defined
+          - semaphore_password | length > 0
+        fail_msg: "SEMAPHORE_PASSWORD environment variable must be set"
+        
+    - name: Install required Python packages
+      pip:
+        name:
+          - requests
+          - PyYAML
+        state: present
+      become: yes
+      
+    - name: Create temporary directory for script
+      tempfile:
+        state: directory
+        suffix: semaphore-sync
+      register: temp_dir
+      
+    - name: Download template generator script
+      get_url:
+        url: "https://raw.githubusercontent.com/heybearc/homelab-nexus/main/scripts/semaphore-auto-template.py"
+        dest: "{{ temp_dir.path }}/semaphore-auto-template.py"
+        mode: '0755'
+        
+    - name: Fetch playbooks from GitHub
+      uri:
+        url: "https://api.github.com/repos/{{ github_repo }}/contents/playbooks"
+        return_content: yes
+      register: github_playbooks
+      
+    - name: Display discovered playbooks
+      debug:
+        msg: "Found {{ github_playbooks.json | selectattr('name', 'match', '.*\\.ya?ml$') | list | length }} playbooks in repository"
+        
+    - name: Run template generator script
+      command:
+        cmd: python3 {{ temp_dir.path }}/semaphore-auto-template.py
+      environment:
+        SEMAPHORE_URL: "{{ semaphore_url }}"
+        SEMAPHORE_USER: "{{ semaphore_user }}"
+        SEMAPHORE_PASSWORD: "{{ semaphore_password }}"
+        SEMAPHORE_PROJECT_ID: "{{ semaphore_project_id }}"
+      register: sync_result
+      changed_when: "'Created:' in sync_result.stdout and sync_result.stdout is search('Created: [1-9]')"
+      
+    - name: Display sync results
+      debug:
+        msg: "{{ sync_result.stdout_lines }}"
+        
+    - name: Clean up temporary directory
+      file:
+        path: "{{ temp_dir.path }}"
+        state: absent
+        
+    - name: Summary
+      debug:
+        msg:
+          - "✅ Template sync complete"
+          - "Check Semaphore UI for new templates"
+          - "URL: {{ semaphore_url }}/project/{{ semaphore_project_id }}/templates"
