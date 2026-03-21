@@ -101,7 +101,7 @@
     
     - name: Determine bridge based on IP subnet
       set_fact:
-        bridge: "{{ 'vmbr923' if container_ip.startswith('10.92.3.') else 'vmbr0' }}"
+        bridge: "{{ 'vmbr0923' if container_ip.startswith('10.92.3.') else 'vmbr0' }}"
     
     - name: Create LXC container on Proxmox
       shell: |
