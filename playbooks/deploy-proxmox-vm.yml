@@ -4,7 +4,7 @@
   gather_facts: no
   vars:
     # Proxmox settings
-    proxmox_host: "10.92.0.5"
+    proxmox_host: "prox"
     proxmox_node: "prox"
     
     # Network settings

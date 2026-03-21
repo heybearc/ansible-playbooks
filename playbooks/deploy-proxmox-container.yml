@@ -4,7 +4,7 @@
   gather_facts: no
   vars:
     # Proxmox settings
-    proxmox_host: "10.92.0.5"
+    proxmox_host: "prox"
     proxmox_node: "prox"
     
     # Network settings
@@ -229,29 +229,9 @@
       
     - name: Install node_exporter for monitoring
       shell: |
-        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c '\
-          wget -q https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz && \
-          tar xzf node_exporter-1.7.0.linux-amd64.tar.gz && \
-          cp node_exporter-1.7.0.linux-amd64/node_exporter /usr/local/bin/ && \
-          rm -rf node_exporter-1.7.0* && \
-          useradd -rs /bin/false node_exporter && \
-          cat > /etc/systemd/system/node_exporter.service << \"EOFSERVICE\"
-[Unit]
-Description=Node Exporter
-After=network.target
-
-[Service]
-User=node_exporter
-Group=node_exporter
-Type=simple
-ExecStart=/usr/local/bin/node_exporter
-
-[Install]
-WantedBy=multi-user.target
-EOFSERVICE
-          systemctl daemon-reload && \
-          systemctl enable node_exporter && \
-          systemctl start node_exporter'"
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'wget -q https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz && tar xzf node_exporter-1.7.0.linux-amd64.tar.gz && cp node_exporter-1.7.0.linux-amd64/node_exporter /usr/local/bin/ && rm -rf node_exporter-1.7.0* && useradd -rs /bin/false node_exporter'"
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'echo \"[Unit]\" > /etc/systemd/system/node_exporter.service && echo \"Description=Node Exporter\" >> /etc/systemd/system/node_exporter.service && echo \"After=network.target\" >> /etc/systemd/system/node_exporter.service && echo \"\" >> /etc/systemd/system/node_exporter.service && echo \"[Service]\" >> /etc/systemd/system/node_exporter.service && echo \"User=node_exporter\" >> /etc/systemd/system/node_exporter.service && echo \"Group=node_exporter\" >> /etc/systemd/system/node_exporter.service && echo \"Type=simple\" >> /etc/systemd/system/node_exporter.service && echo \"ExecStart=/usr/local/bin/node_exporter\" >> /etc/systemd/system/node_exporter.service && echo \"\" >> /etc/systemd/system/node_exporter.service && echo \"[Install]\" >> /etc/systemd/system/node_exporter.service && echo \"WantedBy=multi-user.target\" >> /etc/systemd/system/node_exporter.service'"
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'systemctl daemon-reload && systemctl enable node_exporter && systemctl start node_exporter'"
       when: skip_monitoring is not defined or not skip_monitoring
       ignore_errors: yes
       
