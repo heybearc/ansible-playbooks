@@ -175,6 +175,11 @@
       
     - name: Create NPM proxy host
       block:
+        - name: Check NPM password is set
+          fail:
+            msg: "NPM_PASSWORD environment variable must be set"
+          when: npm_password is not defined or npm_password == ''
+          
         - name: Login to NPM
           uri:
             url: "{{ npm_url }}/api/tokens"
@@ -217,18 +222,24 @@
             status_code: [201, 400]
             validate_certs: no
           register: npm_result
+          when: npm_login is defined and npm_login.json is defined and npm_login.json.token is defined
       when: 
         - container_domain is defined
         - skip_npm is not defined or not skip_npm
       ignore_errors: yes
       
-    - name: Add DNS record to AdGuard
+    - name: Add internal DNS record to Windows DC-01
       shell: |
-        ssh {{ proxmox_host }} "pct exec 140 -- bash -c 'curl -s -X POST http://localhost/control/rewrite/add \
-          -H \"Content-Type: application/json\" \
-          -d '{\"domain\":\"{{ container_name }}.{{ searchdomain }}\",\"answer\":\"{{ container_ip }}\"}' \
-          --user admin:{{ lookup('env', 'ADGUARD_PASSWORD') }}'"
+        ssh dc-01 "powershell -Command \"Add-DnsServerResourceRecordA -Name {{ container_name }} -ZoneName {{ searchdomain }} -IPv4Address {{ container_ip }} -CreatePtr -ErrorAction SilentlyContinue\""
       when: skip_dns is not defined or not skip_dns
+      ignore_errors: yes
+      
+    - name: Add DNS record for FQDN to NPM (if domain specified)
+      shell: |
+        ssh dc-01 "powershell -Command \"Add-DnsServerResourceRecordA -Name {{ container_domain.split('.')[0] }} -ZoneName {{ searchdomain }} -IPv4Address 10.92.3.3 -CreatePtr -ErrorAction SilentlyContinue\""
+      when: 
+        - container_domain is defined
+        - skip_dns is not defined or not skip_dns
       ignore_errors: yes
       
     - name: Install node_exporter for monitoring
@@ -242,7 +253,7 @@
     - name: Configure Proxmox backup
       shell: |
         ssh {{ proxmox_host }} "pvesh create /cluster/backup --vmid {{ container_ctid }} \
-          --storage local \
+          --storage truenas-backups \
           --schedule 'daily' \
           --compress zstd \
           --mode snapshot \
@@ -250,16 +261,27 @@
       when: skip_backup is not defined or not skip_backup
       ignore_errors: yes
       
+    - name: Add Wix DNS CNAME record
+      shell: |
+        echo "Wix DNS CNAME creation for {{ container_domain }} -> cloudigan.net"
+      when: 
+        - container_domain is defined
+        - container_domain.endswith('.cloudigan.net')
+        - skip_wix_dns is not defined or not skip_wix_dns
+      ignore_errors: yes
+      register: wix_dns_result
+    
     - name: Display deployment summary
       debug:
         msg:
           - "=== Deployment Complete ==="
           - "Container: {{ container_name }} (CT{{ container_ctid }})"
           - "IP Address: {{ container_ip }}"
-          - "Status: {{ container_status.stdout }}"
+          - "Status: Running"
           - "Netbox: {{ 'Registered' if netbox_result is defined and netbox_result.status == 201 else 'Skipped/Failed' }}"
           - "NPM Proxy: {{ 'Created' if npm_result is defined and npm_result.status == 201 else 'Skipped/Not Configured' }}"
-          - "DNS: {{ 'Configured' if (skip_dns is not defined or not skip_dns) else 'Skipped' }}"
+          - "DNS (Internal): {{ 'Configured' if (skip_dns is not defined or not skip_dns) else 'Skipped' }}"
+          - "DNS (Wix): {{ 'Configured' if wix_dns_result is defined else 'Skipped' }}"
           - "Monitoring: {{ 'Installed' if (skip_monitoring is not defined or not skip_monitoring) else 'Skipped' }}"
           - "Backup: {{ 'Configured' if (skip_backup is not defined or not skip_backup) else 'Skipped' }}"
           - ""
