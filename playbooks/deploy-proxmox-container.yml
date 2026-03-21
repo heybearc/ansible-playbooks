@@ -99,6 +99,10 @@
           - "Privileged: {{ privileged }}"
           - "Template: {{ template }}"
     
+    - name: Determine bridge based on IP subnet
+      set_fact:
+        bridge: "{{ 'vmbr923' if container_ip.startswith('10.92.3.') else 'vmbr0' }}"
+    
     - name: Create LXC container on Proxmox
       shell: |
         ssh {{ proxmox_host }} "pct create {{ container_ctid }} {{ template }} \
@@ -106,7 +110,7 @@
           --memory {{ memory }} \
           --cores {{ cores }} \
           --rootfs hdd-pool:{{ disk }} \
-          --net0 name=eth0,bridge=vmbr0,ip={{ container_ip }}/{{ subnet }},gw={{ gateway }} \
+          --net0 name=eth0,bridge={{ bridge }},ip={{ container_ip }}/{{ subnet }},gw={{ gateway }} \
           --nameserver {{ nameserver }} \
           --searchdomain {{ searchdomain }} \
           --onboot 1 \
