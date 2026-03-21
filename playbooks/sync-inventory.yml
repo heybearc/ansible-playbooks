@@ -68,26 +68,22 @@
         ssh_key_id: "{{ ssh_keys.json[0].id }}"
       when: ssh_keys.json | length > 0
 
-    - name: Debug - Show what we're sending
-      debug:
-        msg:
-          - "Inventory ID: {{ inventory_id }}"
-          - "SSH Key ID: {{ ssh_key_id }}"
-          - "Project ID: {{ semaphore_project_id | default('1') }}"
-          - "Inventory length: {{ (inventory_content.content | b64decode) | length }} chars"
+    - name: Prepare inventory update body
+      set_fact:
+        inventory_body:
+          id: "{{ inventory_id | int }}"
+          name: "Production Hosts"
+          project_id: "{{ semaphore_project_id | default('1') | int }}"
+          inventory: "{{ inventory_content.content | b64decode }}"
+          ssh_key_id: "{{ ssh_key_id | int }}"
+          type: "static"
 
     - name: Update inventory
       uri:
         url: "{{ semaphore_url | default('https://ansible.cloudigan.net') }}/api/project/{{ semaphore_project_id | default('1') }}/inventory/{{ inventory_id }}"
         method: PUT
         body_format: json
-        body:
-          id: {{ inventory_id | int }}
-          name: "Production Hosts"
-          project_id: {{ semaphore_project_id | default('1') | int }}
-          inventory: "{{ inventory_content.content | b64decode }}"
-          ssh_key_id: {{ ssh_key_id | int }}
-          type: "static"
+        body: "{{ inventory_body }}"
         validate_certs: yes
         status_code: 204
         headers:
