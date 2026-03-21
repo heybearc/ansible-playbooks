@@ -140,7 +140,8 @@ def create_template_from_playbook(
     api: SemaphoreAPI,
     project_id: int,
     playbook_name: str,
-    resources: Dict
+    resources: Dict,
+    existing_templates: List[Dict]
 ) -> Optional[Dict]:
     """Create a Semaphore template for a given playbook"""
     
@@ -148,6 +149,15 @@ def create_template_from_playbook(
     metadata = PLAYBOOK_METADATA.get(playbook_name)
     if not metadata:
         print(f"⚠️  No metadata for {playbook_name}, skipping")
+        return None
+    
+    # Check if template already exists
+    template_exists = any(
+        t.get('name') == metadata['name'] 
+        for t in existing_templates
+    )
+    if template_exists:
+        print(f"⏭️  Template '{metadata['name']}' already exists, skipping")
         return None
     
     # Find the Ansible Playbooks repository
@@ -268,7 +278,7 @@ def main():
     skipped = 0
     
     for playbook in playbooks:
-        result = create_template_from_playbook(api, project_id, playbook, resources)
+        result = create_template_from_playbook(api, project_id, playbook, resources, existing_templates)
         if result:
             created += 1
         else:
