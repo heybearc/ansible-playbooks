@@ -1,0 +1,283 @@
+---
+- name: Deploy Proxmox LXC Container with Full Automation
+  hosts: localhost
+  gather_facts: no
+  vars:
+    # Proxmox settings
+    proxmox_host: "10.92.0.5"
+    proxmox_node: "prox"
+    
+    # Network settings
+    gateway: "10.92.3.1"
+    subnet: "24"
+    nameserver: "10.92.3.19"
+    searchdomain: "cloudigan.net"
+    
+    # Default container settings
+    default_memory: 2048
+    default_cores: 2
+    default_disk: 32
+    default_template: "local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+    
+    # Integration endpoints
+    netbox_url: "http://10.92.3.18"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+    npm_url: "http://10.92.3.3:81"
+    npm_email: "admin@cloudigan.net"
+    npm_password: "{{ lookup('env', 'NPM_PASSWORD') }}"
+    
+    # CTID ranges by function
+    ctid_ranges:
+      bot: { min: 100, max: 109 }
+      dev: { min: 110, max: 119 }
+      media: { min: 120, max: 129 }
+      core: { min: 130, max: 139 }
+      network: { min: 140, max: 149 }
+      monitoring: { min: 150, max: 159 }
+      storage: { min: 160, max: 169 }
+      security: { min: 170, max: 179 }
+      utility: { min: 180, max: 189 }
+  
+  tasks:
+    - name: Validate required variables
+      assert:
+        that:
+          - container_name is defined
+          - container_function is defined
+          - container_ip is defined
+        fail_msg: "Required variables: container_name, container_function, container_ip"
+    
+    - name: Validate container function
+      assert:
+        that:
+          - container_function in ctid_ranges.keys()
+        fail_msg: "Invalid function. Must be one of: {{ ctid_ranges.keys() | join(', ') }}"
+    
+    - name: Set container defaults
+      set_fact:
+        memory: "{{ container_memory | default(default_memory) }}"
+        cores: "{{ container_cores | default(default_cores) }}"
+        disk: "{{ container_disk | default(default_disk) }}"
+        template: "{{ container_template | default(default_template) }}"
+        privileged: "{{ container_privileged | default(false) }}"
+        
+    - name: Get list of existing CTIDs
+      shell: ssh {{ proxmox_host }} "pct list | awk 'NR>1 {print $1}'"
+      register: existing_ctids
+      changed_when: false
+      
+    - name: Auto-assign CTID if not provided
+      block:
+        - name: Find available CTID in range
+          set_fact:
+            container_ctid: "{{ item }}"
+          loop: "{{ range(ctid_ranges[container_function].min, ctid_ranges[container_function].max + 1) | list }}"
+          when: 
+            - container_ctid is not defined
+            - item | string not in existing_ctids.stdout_lines
+          loop_control:
+            label: "Checking CTID {{ item }}"
+          
+        - name: Verify CTID was assigned
+          assert:
+            that:
+              - container_ctid is defined
+            fail_msg: "No available CTID in {{ container_function }} range ({{ ctid_ranges[container_function].min }}-{{ ctid_ranges[container_function].max }})"
+      when: container_ctid is not defined
+    
+    - name: Display deployment plan
+      debug:
+        msg:
+          - "=== Container Deployment Plan ==="
+          - "Name: {{ container_name }}"
+          - "CTID: {{ container_ctid }}"
+          - "Function: {{ container_function }}"
+          - "IP: {{ container_ip }}/{{ subnet }}"
+          - "Memory: {{ memory }}MB"
+          - "Cores: {{ cores }}"
+          - "Disk: {{ disk }}GB"
+          - "Privileged: {{ privileged }}"
+          - "Template: {{ template }}"
+    
+    - name: Create LXC container on Proxmox
+      shell: |
+        ssh {{ proxmox_host }} "pct create {{ container_ctid }} {{ template }} \
+          --hostname {{ container_name }} \
+          --memory {{ memory }} \
+          --cores {{ cores }} \
+          --rootfs local-lvm:{{ disk }} \
+          --net0 name=eth0,bridge=vmbr0,ip={{ container_ip }}/{{ subnet }},gw={{ gateway }} \
+          --nameserver {{ nameserver }} \
+          --searchdomain {{ searchdomain }} \
+          --onboot 1 \
+          --start 1 \
+          {% if privileged %}--unprivileged 0{% else %}--unprivileged 1{% endif %} \
+          --features nesting=1"
+      register: create_result
+      
+    - name: Wait for container to start
+      wait_for:
+        timeout: 30
+      delegate_to: localhost
+      
+    - name: Verify container is running
+      shell: ssh {{ proxmox_host }} "pct status {{ container_ctid }}"
+      register: container_status
+      failed_when: "'running' not in container_status.stdout"
+      
+    - name: Register container in Netbox
+      uri:
+        url: "{{ netbox_url }}/api/virtualization/virtual-machines/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "{{ container_name }}"
+          status: "active"
+          cluster: 1
+          role: 2
+          platform: 2
+          vcpus: "{{ cores }}"
+          memory: "{{ memory }}"
+          disk: "{{ disk }}"
+          comments: "Function: {{ container_function }}, CTID: {{ container_ctid }}"
+          custom_fields:
+            ctid: "{{ container_ctid }}"
+        status_code: [201, 400]
+        validate_certs: no
+      register: netbox_result
+      when: skip_netbox is not defined or not skip_netbox
+      ignore_errors: yes
+      
+    - name: Register IP address in Netbox
+      uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          address: "{{ container_ip }}/{{ subnet }}"
+          status: "active"
+          dns_name: "{{ container_name }}.{{ searchdomain }}"
+          description: "{{ container_function }} container - CT{{ container_ctid }}"
+        status_code: [201, 400]
+        validate_certs: no
+      when: skip_netbox is not defined or not skip_netbox
+      ignore_errors: yes
+      
+    - name: Create NPM proxy host
+      block:
+        - name: Login to NPM
+          uri:
+            url: "{{ npm_url }}/api/tokens"
+            method: POST
+            body_format: json
+            body:
+              identity: "{{ npm_email }}"
+              secret: "{{ npm_password }}"
+            status_code: 200
+            validate_certs: no
+          register: npm_login
+          
+        - name: Create proxy host in NPM
+          uri:
+            url: "{{ npm_url }}/api/nginx/proxy-hosts"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ npm_login.json.token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              domain_names:
+                - "{{ container_domain }}"
+              forward_scheme: "{{ 'https' if container_ssl | default(false) else 'http' }}"
+              forward_host: "{{ container_ip }}"
+              forward_port: "{{ container_port | default(80) }}"
+              access_list_id: 0
+              certificate_id: "{{ 1 if container_ssl | default(false) else 0 }}"
+              ssl_forced: "{{ 1 if container_ssl | default(false) else 0 }}"
+              caching_enabled: 0
+              block_exploits: 1
+              advanced_config: ""
+              meta:
+                letsencrypt_agree: false
+                dns_challenge: false
+              allow_websocket_upgrade: 1
+              http2_support: 1
+              hsts_enabled: 1
+              hsts_subdomains: 0
+            status_code: [201, 400]
+            validate_certs: no
+          register: npm_result
+      when: 
+        - container_domain is defined
+        - skip_npm is not defined or not skip_npm
+      ignore_errors: yes
+      
+    - name: Add DNS record to AdGuard
+      shell: |
+        ssh {{ proxmox_host }} "pct exec 140 -- bash -c 'curl -s -X POST http://localhost/control/rewrite/add \
+          -H \"Content-Type: application/json\" \
+          -d '{\"domain\":\"{{ container_name }}.{{ searchdomain }}\",\"answer\":\"{{ container_ip }}\"}' \
+          --user admin:{{ lookup('env', 'ADGUARD_PASSWORD') }}'"
+      when: skip_dns is not defined or not skip_dns
+      ignore_errors: yes
+      
+    - name: Install node_exporter for monitoring
+      shell: |
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c '\
+          wget -q https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz && \
+          tar xzf node_exporter-1.7.0.linux-amd64.tar.gz && \
+          cp node_exporter-1.7.0.linux-amd64/node_exporter /usr/local/bin/ && \
+          rm -rf node_exporter-1.7.0* && \
+          useradd -rs /bin/false node_exporter && \
+          cat > /etc/systemd/system/node_exporter.service << EOF
+[Unit]
+Description=Node Exporter
+After=network.target
+
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+ExecStart=/usr/local/bin/node_exporter
+
+[Install]
+WantedBy=multi-user.target
+EOF
+          systemctl daemon-reload && \
+          systemctl enable node_exporter && \
+          systemctl start node_exporter'"
+      when: skip_monitoring is not defined or not skip_monitoring
+      ignore_errors: yes
+      
+    - name: Configure Proxmox backup
+      shell: |
+        ssh {{ proxmox_host }} "pvesh create /cluster/backup --vmid {{ container_ctid }} \
+          --storage local \
+          --schedule 'daily' \
+          --compress zstd \
+          --mode snapshot \
+          --enabled 1"
+      when: skip_backup is not defined or not skip_backup
+      ignore_errors: yes
+      
+    - name: Display deployment summary
+      debug:
+        msg:
+          - "=== Deployment Complete ==="
+          - "Container: {{ container_name }} (CT{{ container_ctid }})"
+          - "IP Address: {{ container_ip }}"
+          - "Status: {{ container_status.stdout }}"
+          - "Netbox: {{ 'Registered' if netbox_result is defined and netbox_result.status == 201 else 'Skipped/Failed' }}"
+          - "NPM Proxy: {{ 'Created' if npm_result is defined and npm_result.status == 201 else 'Skipped/Not Configured' }}"
+          - "DNS: {{ 'Configured' if (skip_dns is not defined or not skip_dns) else 'Skipped' }}"
+          - "Monitoring: {{ 'Installed' if (skip_monitoring is not defined or not skip_monitoring) else 'Skipped' }}"
+          - "Backup: {{ 'Configured' if (skip_backup is not defined or not skip_backup) else 'Skipped' }}"
+          - ""
+          - "Access container: ssh root@{{ container_ip }}"
+          - "{% if container_domain is defined %}Web UI: https://{{ container_domain }}{% endif %}"

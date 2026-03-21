@@ -1,0 +1,20 @@
+---
+- name: Unified Proxmox Deployment - Container or VM
+  hosts: localhost
+  gather_facts: no
+  
+  tasks:
+    - name: Validate deployment type
+      assert:
+        that:
+          - deployment_type is defined
+          - deployment_type in ['container', 'vm']
+        fail_msg: "deployment_type must be 'container' or 'vm'"
+    
+    - name: Deploy LXC Container
+      include_tasks: deploy-proxmox-container.yml
+      when: deployment_type == 'container'
+      
+    - name: Deploy VM
+      include_tasks: deploy-proxmox-vm.yml
+      when: deployment_type == 'vm'

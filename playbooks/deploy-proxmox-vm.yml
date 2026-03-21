@@ -1,0 +1,273 @@
+---
+- name: Deploy Proxmox VM with Full Automation
+  hosts: localhost
+  gather_facts: no
+  vars:
+    # Proxmox settings
+    proxmox_host: "10.92.0.5"
+    proxmox_node: "prox"
+    
+    # Network settings
+    gateway: "10.92.3.1"
+    subnet: "24"
+    nameserver: "10.92.3.19"
+    searchdomain: "cloudigan.net"
+    
+    # Default VM settings
+    default_memory: 4096
+    default_cores: 2
+    default_disk: 50
+    default_bridge: "vmbr0"
+    
+    # Integration endpoints
+    netbox_url: "http://10.92.3.18"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+    npm_url: "http://10.92.3.3:81"
+    npm_email: "admin@cloudigan.net"
+    npm_password: "{{ lookup('env', 'NPM_PASSWORD') }}"
+    
+    # VMID ranges by function
+    vmid_ranges:
+      infrastructure: { min: 100, max: 119 }
+      application: { min: 120, max: 139 }
+      database: { min: 140, max: 159 }
+      development: { min: 160, max: 179 }
+      testing: { min: 180, max: 199 }
+  
+  tasks:
+    - name: Validate required variables
+      assert:
+        that:
+          - vm_name is defined
+          - vm_function is defined
+          - vm_ip is defined
+          - vm_iso is defined or vm_template is defined
+        fail_msg: "Required variables: vm_name, vm_function, vm_ip, and either vm_iso or vm_template"
+    
+    - name: Validate VM function
+      assert:
+        that:
+          - vm_function in vmid_ranges.keys()
+        fail_msg: "Invalid function. Must be one of: {{ vmid_ranges.keys() | join(', ') }}"
+    
+    - name: Set VM defaults
+      set_fact:
+        memory: "{{ vm_memory | default(default_memory) }}"
+        cores: "{{ vm_cores | default(default_cores) }}"
+        disk: "{{ vm_disk | default(default_disk) }}"
+        bridge: "{{ vm_bridge | default(default_bridge) }}"
+        
+    - name: Get list of existing VMIDs
+      shell: ssh {{ proxmox_host }} "qm list | awk 'NR>1 {print $1}'"
+      register: existing_vmids
+      changed_when: false
+      
+    - name: Auto-assign VMID if not provided
+      block:
+        - name: Find available VMID in range
+          set_fact:
+            vm_id: "{{ item }}"
+          loop: "{{ range(vmid_ranges[vm_function].min, vmid_ranges[vm_function].max + 1) | list }}"
+          when: 
+            - vm_id is not defined
+            - item | string not in existing_vmids.stdout_lines
+          loop_control:
+            label: "Checking VMID {{ item }}"
+          
+        - name: Verify VMID was assigned
+          assert:
+            that:
+              - vm_id is defined
+            fail_msg: "No available VMID in {{ vm_function }} range ({{ vmid_ranges[vm_function].min }}-{{ vmid_ranges[vm_function].max }})"
+      when: vm_id is not defined
+    
+    - name: Display deployment plan
+      debug:
+        msg:
+          - "=== VM Deployment Plan ==="
+          - "Name: {{ vm_name }}"
+          - "VMID: {{ vm_id }}"
+          - "Function: {{ vm_function }}"
+          - "IP: {{ vm_ip }}/{{ subnet }}"
+          - "Memory: {{ memory }}MB"
+          - "Cores: {{ cores }}"
+          - "Disk: {{ disk }}GB"
+          - "{% if vm_iso is defined %}ISO: {{ vm_iso }}{% endif %}"
+          - "{% if vm_template is defined %}Template: {{ vm_template }}{% endif %}"
+    
+    - name: Create VM from ISO
+      shell: |
+        ssh {{ proxmox_host }} "qm create {{ vm_id }} \
+          --name {{ vm_name }} \
+          --memory {{ memory }} \
+          --cores {{ cores }} \
+          --net0 virtio,bridge={{ bridge }} \
+          --scsihw virtio-scsi-pci \
+          --scsi0 local-lvm:{{ disk }} \
+          --ide2 {{ vm_iso }},media=cdrom \
+          --boot order=scsi0;ide2 \
+          --ostype l26 \
+          --agent 1"
+      when: vm_iso is defined
+      register: create_result
+      
+    - name: Clone VM from template
+      shell: |
+        ssh {{ proxmox_host }} "qm clone {{ vm_template }} {{ vm_id }} \
+          --name {{ vm_name }} \
+          --full 1"
+      when: vm_template is defined
+      register: clone_result
+      
+    - name: Configure VM resources (if cloned)
+      shell: |
+        ssh {{ proxmox_host }} "qm set {{ vm_id }} \
+          --memory {{ memory }} \
+          --cores {{ cores }} \
+          --scsi0 local-lvm:{{ disk }}"
+      when: vm_template is defined
+      
+    - name: Configure VM network with cloud-init (if supported)
+      shell: |
+        ssh {{ proxmox_host }} "qm set {{ vm_id }} \
+          --ipconfig0 ip={{ vm_ip }}/{{ subnet }},gw={{ gateway }} \
+          --nameserver {{ nameserver }} \
+          --searchdomain {{ searchdomain }}"
+      when: vm_cloudinit | default(false)
+      ignore_errors: yes
+      
+    - name: Start VM
+      shell: ssh {{ proxmox_host }} "qm start {{ vm_id }}"
+      when: vm_autostart | default(true)
+      
+    - name: Wait for VM to start
+      wait_for:
+        timeout: 60
+      delegate_to: localhost
+      when: vm_autostart | default(true)
+      
+    - name: Register VM in Netbox
+      uri:
+        url: "{{ netbox_url }}/api/virtualization/virtual-machines/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "{{ vm_name }}"
+          status: "active"
+          cluster: 1
+          role: 3
+          platform: 1
+          vcpus: "{{ cores }}"
+          memory: "{{ memory }}"
+          disk: "{{ disk }}"
+          comments: "Function: {{ vm_function }}, VMID: {{ vm_id }}"
+          custom_fields:
+            vmid: "{{ vm_id }}"
+        status_code: [201, 400]
+        validate_certs: no
+      when: skip_netbox is not defined or not skip_netbox
+      ignore_errors: yes
+      
+    - name: Register IP address in Netbox
+      uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          address: "{{ vm_ip }}/{{ subnet }}"
+          status: "active"
+          dns_name: "{{ vm_name }}.{{ searchdomain }}"
+          description: "{{ vm_function }} VM - VM{{ vm_id }}"
+        status_code: [201, 400]
+        validate_certs: no
+      when: skip_netbox is not defined or not skip_netbox
+      ignore_errors: yes
+      
+    - name: Create NPM proxy host
+      block:
+        - name: Login to NPM
+          uri:
+            url: "{{ npm_url }}/api/tokens"
+            method: POST
+            body_format: json
+            body:
+              identity: "{{ npm_email }}"
+              secret: "{{ npm_password }}"
+            status_code: 200
+            validate_certs: no
+          register: npm_login
+          
+        - name: Create proxy host in NPM
+          uri:
+            url: "{{ npm_url }}/api/nginx/proxy-hosts"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ npm_login.json.token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              domain_names:
+                - "{{ vm_domain }}"
+              forward_scheme: "{{ 'https' if vm_ssl | default(false) else 'http' }}"
+              forward_host: "{{ vm_ip }}"
+              forward_port: "{{ vm_port | default(80) }}"
+              access_list_id: 0
+              certificate_id: "{{ 1 if vm_ssl | default(false) else 0 }}"
+              ssl_forced: "{{ 1 if vm_ssl | default(false) else 0 }}"
+              caching_enabled: 0
+              block_exploits: 1
+              advanced_config: ""
+              meta:
+                letsencrypt_agree: false
+                dns_challenge: false
+              allow_websocket_upgrade: 1
+              http2_support: 1
+              hsts_enabled: 1
+              hsts_subdomains: 0
+            status_code: [201, 400]
+            validate_certs: no
+      when: 
+        - vm_domain is defined
+        - skip_npm is not defined or not skip_npm
+      ignore_errors: yes
+      
+    - name: Add DNS record to AdGuard
+      shell: |
+        ssh {{ proxmox_host }} "pct exec 140 -- bash -c 'curl -s -X POST http://localhost/control/rewrite/add \
+          -H \"Content-Type: application/json\" \
+          -d '{\"domain\":\"{{ vm_name }}.{{ searchdomain }}\",\"answer\":\"{{ vm_ip }}\"}' \
+          --user admin:{{ lookup('env', 'ADGUARD_PASSWORD') }}'"
+      when: skip_dns is not defined or not skip_dns
+      ignore_errors: yes
+      
+    - name: Configure Proxmox backup
+      shell: |
+        ssh {{ proxmox_host }} "pvesh create /cluster/backup --vmid {{ vm_id }} \
+          --storage local \
+          --schedule 'daily' \
+          --compress zstd \
+          --mode snapshot \
+          --enabled 1"
+      when: skip_backup is not defined or not skip_backup
+      ignore_errors: yes
+      
+    - name: Display deployment summary
+      debug:
+        msg:
+          - "=== Deployment Complete ==="
+          - "VM: {{ vm_name }} (VM{{ vm_id }})"
+          - "IP Address: {{ vm_ip }}"
+          - "Netbox: {{ 'Registered' if (skip_netbox is not defined or not skip_netbox) else 'Skipped' }}"
+          - "NPM Proxy: {{ 'Configured' if vm_domain is defined else 'Not Configured' }}"
+          - "DNS: {{ 'Configured' if (skip_dns is not defined or not skip_dns) else 'Skipped' }}"
+          - "Backup: {{ 'Configured' if (skip_backup is not defined or not skip_backup) else 'Skipped' }}"
+          - ""
+          - "{% if vm_iso is defined %}Manual installation required - connect via Proxmox console{% endif %}"
+          - "{% if vm_template is defined %}Access VM: ssh user@{{ vm_ip }}{% endif %}"
+          - "{% if vm_domain is defined %}Web UI: https://{{ vm_domain }}{% endif %}"
