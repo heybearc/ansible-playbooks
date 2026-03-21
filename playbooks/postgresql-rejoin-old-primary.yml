@@ -1,0 +1,88 @@
+---
+- name: PostgreSQL Recovery - Rejoin Old Primary as New Standby
+  hosts: localhost
+  gather_facts: no
+  vars:
+    new_primary_host: "10.92.3.31"
+    old_primary_host: "10.92.3.21"
+    new_primary_container: "ct151"
+    old_primary_container: "ct131"
+  
+  tasks:
+    - name: Check if new primary is reachable and not in recovery
+      shell: |
+        ssh prox "pct exec {{ new_primary_container }} -- bash -c 'sudo -u postgres psql -c \"SELECT pg_is_in_recovery();\"'"
+      register: new_primary_check
+      
+    - name: Abort if new primary is in recovery mode
+      fail:
+        msg: "New primary {{ new_primary_container }} is still in recovery mode. Cannot rejoin old primary."
+      when: "'t' in new_primary_check.stdout"
+      
+    - name: Check if old primary is running
+      shell: |
+        ssh prox "pct exec {{ old_primary_container }} -- bash -c 'systemctl is-active postgresql'"
+      register: old_primary_status
+      ignore_errors: yes
+      
+    - name: Stop old primary PostgreSQL if running
+      shell: |
+        ssh prox "pct exec {{ old_primary_container }} -- bash -c 'systemctl stop postgresql'"
+      when: old_primary_status.stdout == 'active'
+      
+    - name: Remove old primary data directory
+      shell: |
+        ssh prox "pct exec {{ old_primary_container }} -- bash -c 'rm -rf /var/lib/postgresql/17/main/*'"
+      
+    - name: Create base backup from new primary
+      shell: |
+        ssh prox "pct exec {{ old_primary_container }} -- bash -c 'sudo -u postgres pg_basebackup -h {{ new_primary_host }} -D /var/lib/postgresql/17/main -U postgres -P -R'"
+      register: basebackup_result
+      
+    - name: Start old primary as new standby
+      shell: |
+        ssh prox "pct exec {{ old_primary_container }} -- bash -c 'systemctl start postgresql'"
+      
+    - name: Wait for PostgreSQL to start
+      wait_for:
+        timeout: 10
+      delegate_to: localhost
+      
+    - name: Verify old primary is now in recovery mode
+      shell: |
+        ssh prox "pct exec {{ old_primary_container }} -- bash -c 'sudo -u postgres psql -c \"SELECT pg_is_in_recovery();\"'"
+      register: recovery_verify
+      
+    - name: Display rejoin result
+      debug:
+        msg:
+          - "Old primary {{ old_primary_container }} has been rejoined as standby"
+          - "Recovery mode: {{ recovery_verify.stdout }}"
+          - "Replication from: {{ new_primary_host }}"
+      when: "'t' in recovery_verify.stdout"
+      
+    - name: Send Teams notification
+      uri:
+        url: "{{ lookup('env', 'TEAMS_WEBHOOK_URL') }}"
+        method: POST
+        body_format: json
+        body:
+          "@type": "MessageCard"
+          "@context": "https://schema.org/extensions"
+          summary: "PostgreSQL Standby Rejoined"
+          themeColor: "00FF00"
+          title: "✅ PostgreSQL Standby Rejoined"
+          sections:
+            - activityTitle: "Recovery Event"
+              activitySubtitle: "{{ ansible_date_time.iso8601 }}"
+              facts:
+                - name: "Current Primary"
+                  value: "{{ new_primary_container }} ({{ new_primary_host }})"
+                - name: "Rejoined Standby"
+                  value: "{{ old_primary_container }} ({{ old_primary_host }})"
+                - name: "Status"
+                  value: "Standby successfully rejoined and replicating"
+              text: "Old primary has been successfully rejoined to the cluster as a standby replica."
+        status_code: 200
+      ignore_errors: yes
+      when: lookup('env', 'TEAMS_WEBHOOK_URL') != ''

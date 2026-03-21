@@ -1,0 +1,91 @@
+---
+- name: PostgreSQL Automatic Failover - Promote Standby to Primary
+  hosts: localhost
+  gather_facts: no
+  vars:
+    primary_host: "10.92.3.21"
+    standby_host: "10.92.3.31"
+    primary_container: "ct131"
+    standby_container: "ct151"
+  
+  tasks:
+    - name: Check if primary is really down
+      wait_for:
+        host: "{{ primary_host }}"
+        port: 5432
+        timeout: 10
+        state: started
+      register: primary_check
+      ignore_errors: yes
+      
+    - name: Abort if primary is still reachable
+      fail:
+        msg: "Primary PostgreSQL ({{ primary_host }}) is still reachable. Aborting failover to prevent split-brain."
+      when: primary_check is succeeded
+      
+    - name: Check if standby is reachable
+      wait_for:
+        host: "{{ standby_host }}"
+        port: 5432
+        timeout: 10
+        state: started
+      register: standby_check
+      ignore_errors: yes
+      
+    - name: Abort if standby is not reachable
+      fail:
+        msg: "Standby PostgreSQL ({{ standby_host }}) is not reachable. Cannot perform failover."
+      when: standby_check is failed
+      
+    - name: Log failover initiation
+      debug:
+        msg: "FAILOVER INITIATED: Promoting {{ standby_container }} ({{ standby_host }}) to primary"
+        
+    - name: Promote standby to primary
+      shell: |
+        ssh prox "pct exec {{ standby_container }} -- bash -c 'sudo -u postgres /usr/lib/postgresql/17/bin/pg_ctl promote -D /var/lib/postgresql/17/main'"
+      register: promote_result
+      
+    - name: Wait for promotion to complete
+      wait_for:
+        timeout: 10
+      delegate_to: localhost
+      
+    - name: Verify promotion was successful
+      shell: |
+        ssh prox "pct exec {{ standby_container }} -- bash -c 'sudo -u postgres psql -c \"SELECT pg_is_in_recovery();\"'"
+      register: recovery_check
+      
+    - name: Display promotion result
+      debug:
+        msg: 
+          - "Promotion command result: {{ promote_result.stdout }}"
+          - "Recovery status check: {{ recovery_check.stdout }}"
+          - "FAILOVER COMPLETE: {{ standby_container }} is now the PRIMARY"
+      when: "'f' in recovery_check.stdout"
+      
+    - name: Send Teams notification
+      uri:
+        url: "{{ lookup('env', 'TEAMS_WEBHOOK_URL') }}"
+        method: POST
+        body_format: json
+        body:
+          "@type": "MessageCard"
+          "@context": "https://schema.org/extensions"
+          summary: "PostgreSQL Failover Completed"
+          themeColor: "FF0000"
+          title: "🔴 PostgreSQL Automatic Failover"
+          sections:
+            - activityTitle: "Failover Event"
+              activitySubtitle: "{{ ansible_date_time.iso8601 }}"
+              facts:
+                - name: "Old Primary"
+                  value: "{{ primary_container }} ({{ primary_host }}) - DOWN"
+                - name: "New Primary"
+                  value: "{{ standby_container }} ({{ standby_host }}) - PROMOTED"
+                - name: "Status"
+                  value: "Failover completed successfully"
+              text: "PostgreSQL standby has been automatically promoted to primary due to primary failure detection."
+        status_code: 200
+      ignore_errors: yes
+      when: lookup('env', 'TEAMS_WEBHOOK_URL') != ''
