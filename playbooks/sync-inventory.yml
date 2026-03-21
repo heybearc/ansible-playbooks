@@ -1,54 +1,76 @@
 ---
 - name: Sync Semaphore Inventory from production-hosts.ini
   hosts: localhost
+  connection: local
   gather_facts: no
-  vars:
-    semaphore_url: "https://ansible.cloudigan.net"
-    semaphore_token: "{{ lookup('env', 'SEMAPHORE_API_TOKEN') }}"
-    inventory_file: "../inventory/production-hosts.ini"
-    inventory_name: "Production Hosts"
-    project_id: 1
-
+  
   tasks:
+    - name: Verify required variables are set
+      assert:
+        that:
+          - semaphore_password is defined
+          - semaphore_password | length > 0
+        fail_msg: "SEMAPHORE_PASSWORD environment variable must be set"
+    
+    - name: Get repository root directory
+      command: git rev-parse --show-toplevel
+      register: repo_root
+      changed_when: false
+      
+    - name: Set inventory file path
+      set_fact:
+        inventory_file: "{{ repo_root.stdout }}/inventory/production-hosts.ini"
+        
     - name: Read inventory file
       slurp:
         src: "{{ inventory_file }}"
       register: inventory_content
 
+    - name: Login to Semaphore
+      uri:
+        url: "{{ semaphore_url | default('https://ansible.cloudigan.net') }}/api/auth/login"
+        method: POST
+        body_format: json
+        body:
+          auth: "{{ semaphore_user | default('admin') }}"
+          password: "{{ semaphore_password }}"
+        validate_certs: yes
+        status_code: 204
+      register: login_result
+
     - name: Get existing inventories
       uri:
-        url: "{{ semaphore_url }}/api/project/{{ project_id }}/inventory"
+        url: "{{ semaphore_url | default('https://ansible.cloudigan.net') }}/api/project/{{ semaphore_project_id | default('1') }}/inventory"
         method: GET
-        headers:
-          Authorization: "Bearer {{ semaphore_token }}"
         validate_certs: yes
+        headers:
+          Cookie: "{{ login_result.set_cookie }}"
       register: inventories
 
     - name: Find Production Hosts inventory ID
       set_fact:
         inventory_id: "{{ item.id }}"
       loop: "{{ inventories.json }}"
-      when: item.name == inventory_name
+      when: item.name == "Production Hosts"
       no_log: true
 
     - name: Update inventory
       uri:
-        url: "{{ semaphore_url }}/api/project/{{ project_id }}/inventory/{{ inventory_id }}"
+        url: "{{ semaphore_url | default('https://ansible.cloudigan.net') }}/api/project/{{ semaphore_project_id | default('1') }}/inventory/{{ inventory_id }}"
         method: PUT
-        headers:
-          Authorization: "Bearer {{ semaphore_token }}"
-          Content-Type: "application/json"
         body_format: json
         body:
-          name: "{{ inventory_name }}"
-          project_id: "{{ project_id }}"
+          name: "Production Hosts"
+          project_id: "{{ semaphore_project_id | default('1') | int }}"
           inventory: "{{ inventory_content.content | b64decode }}"
           ssh_key_id: 1
           type: "static"
         validate_certs: yes
         status_code: 204
+        headers:
+          Cookie: "{{ login_result.set_cookie }}"
       register: update_result
 
     - name: Inventory sync complete
       debug:
-        msg: "Successfully updated Semaphore inventory '{{ inventory_name }}' with {{ inventory_content.content | b64decode | regex_findall('ansible_host=') | length }} hosts"
+        msg: "✅ Successfully updated Semaphore inventory 'Production Hosts' with {{ inventory_content.content | b64decode | regex_findall('ansible_host=') | length }} hosts"
