@@ -1,6 +1,6 @@
 ---
-- name: Node.js App Management - Restart PM2 applications
-  hosts: nodejs_apps
+- name: Restart Node.js Apps - Restart PM2-managed applications
+  hosts: theoshift-green,theoshift-blue,ldctools-green,ldctools-blue,quantshift-green,quantshift-blue
   become: yes
   gather_facts: no
   

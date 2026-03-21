@@ -1,6 +1,6 @@
 ---
 - name: PostgreSQL Status - Check database cluster health
-  hosts: postgresql
+  hosts: postgresql-primary,postgresql-replica
   become: yes
   become_user: postgres
   gather_facts: no
