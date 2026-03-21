@@ -103,7 +103,7 @@
           --cores {{ cores }} \
           --net0 virtio,bridge={{ bridge }} \
           --scsihw virtio-scsi-pci \
-          --scsi0 local-lvm:{{ disk }} \
+          --scsi0 hdd-pool:{{ disk }} \
           --ide2 {{ vm_iso }},media=cdrom \
           --boot order=scsi0;ide2 \
           --ostype l26 \
@@ -124,7 +124,7 @@
         ssh {{ proxmox_host }} "qm set {{ vm_id }} \
           --memory {{ memory }} \
           --cores {{ cores }} \
-          --scsi0 local-lvm:{{ disk }}"
+          --scsi0 hdd-pool:{{ disk }}"
       when: vm_template is defined
       
     - name: Configure VM network with cloud-init (if supported)

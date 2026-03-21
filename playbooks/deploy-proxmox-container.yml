@@ -105,7 +105,7 @@
           --hostname {{ container_name }} \
           --memory {{ memory }} \
           --cores {{ cores }} \
-          --rootfs local-lvm:{{ disk }} \
+          --rootfs hdd-pool:{{ disk }} \
           --net0 name=eth0,bridge=vmbr0,ip={{ container_ip }}/{{ subnet }},gw={{ gateway }} \
           --nameserver {{ nameserver }} \
           --searchdomain {{ searchdomain }} \
