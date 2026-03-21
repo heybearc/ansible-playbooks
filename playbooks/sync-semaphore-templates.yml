@@ -3,13 +3,6 @@
   hosts: localhost
   connection: local
   gather_facts: no
-  
-  vars:
-    semaphore_url: "{{ semaphore_url | default('https://ansible.cloudigan.net') }}"
-    semaphore_user: "{{ semaphore_user | default('admin') }}"
-    semaphore_password: "{{ semaphore_password | default('') }}"
-    semaphore_project_id: "{{ semaphore_project_id | default('1') }}"
-    github_repo: "heybearc/ansible-playbooks"
     
   tasks:
     - name: Verify required variables are set
@@ -38,7 +31,7 @@
         
     - name: Fetch playbooks from GitHub
       uri:
-        url: "https://api.github.com/repos/{{ github_repo }}/contents/playbooks"
+        url: "https://api.github.com/repos/heybearc/ansible-playbooks/contents/playbooks"
         return_content: yes
       register: github_playbooks
       
@@ -50,10 +43,10 @@
       command:
         cmd: python3 {{ script_path }}
       environment:
-        SEMAPHORE_URL: "{{ semaphore_url }}"
-        SEMAPHORE_USER: "{{ semaphore_user }}"
+        SEMAPHORE_URL: "{{ semaphore_url | default('https://ansible.cloudigan.net') }}"
+        SEMAPHORE_USER: "{{ semaphore_user | default('admin') }}"
         SEMAPHORE_PASSWORD: "{{ semaphore_password }}"
-        SEMAPHORE_PROJECT_ID: "{{ semaphore_project_id }}"
+        SEMAPHORE_PROJECT_ID: "{{ semaphore_project_id | default('1') }}"
       register: sync_result
       changed_when: "'Created:' in sync_result.stdout and sync_result.stdout is search('Created: [1-9]')"
       
@@ -66,4 +59,4 @@
         msg:
           - "✅ Template sync complete"
           - "Check Semaphore UI for new templates"
-          - "URL: {{ semaphore_url }}/project/{{ semaphore_project_id }}/templates"
+          - "URL: {{ semaphore_url | default('https://ansible.cloudigan.net') }}/project/{{ semaphore_project_id | default('1') }}/templates"
