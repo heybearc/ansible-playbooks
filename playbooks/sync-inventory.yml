@@ -54,16 +54,31 @@
       when: item.name == "Production Hosts"
       no_log: true
 
+    - name: Get SSH keys
+      uri:
+        url: "{{ semaphore_url | default('https://ansible.cloudigan.net') }}/api/project/{{ semaphore_project_id | default('1') }}/keys"
+        method: GET
+        validate_certs: yes
+        headers:
+          Cookie: "{{ login_result.set_cookie }}"
+      register: ssh_keys
+
+    - name: Find SSH key ID
+      set_fact:
+        ssh_key_id: "{{ ssh_keys.json[0].id }}"
+      when: ssh_keys.json | length > 0
+
     - name: Update inventory
       uri:
         url: "{{ semaphore_url | default('https://ansible.cloudigan.net') }}/api/project/{{ semaphore_project_id | default('1') }}/inventory/{{ inventory_id }}"
         method: PUT
         body_format: json
         body:
+          id: "{{ inventory_id | int }}"
           name: "Production Hosts"
           project_id: "{{ semaphore_project_id | default('1') | int }}"
           inventory: "{{ inventory_content.content | b64decode }}"
-          ssh_key_id: 1
+          ssh_key_id: "{{ ssh_key_id | int }}"
           type: "static"
         validate_certs: yes
         status_code: 204
