@@ -27,17 +27,14 @@
         state: present
       become: yes
       
-    - name: Create temporary directory for script
-      tempfile:
-        state: directory
-        suffix: semaphore-sync
-      register: temp_dir
+    - name: Get repository root directory
+      command: git rev-parse --show-toplevel
+      register: repo_root
+      changed_when: false
       
-    - name: Download template generator script
-      get_url:
-        url: "https://raw.githubusercontent.com/heybearc/homelab-nexus/main/scripts/semaphore-auto-template.py"
-        dest: "{{ temp_dir.path }}/semaphore-auto-template.py"
-        mode: '0755'
+    - name: Set script path
+      set_fact:
+        script_path: "{{ repo_root.stdout }}/scripts/semaphore-auto-template.py"
         
     - name: Fetch playbooks from GitHub
       uri:
@@ -51,7 +48,7 @@
         
     - name: Run template generator script
       command:
-        cmd: python3 {{ temp_dir.path }}/semaphore-auto-template.py
+        cmd: python3 {{ script_path }}
       environment:
         SEMAPHORE_URL: "{{ semaphore_url }}"
         SEMAPHORE_USER: "{{ semaphore_user }}"
@@ -63,11 +60,6 @@
     - name: Display sync results
       debug:
         msg: "{{ sync_result.stdout_lines }}"
-        
-    - name: Clean up temporary directory
-      file:
-        path: "{{ temp_dir.path }}"
-        state: absent
         
     - name: Summary
       debug:
