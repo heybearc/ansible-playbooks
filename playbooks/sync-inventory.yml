@@ -1,0 +1,54 @@
+---
+- name: Sync Semaphore Inventory from production-hosts.ini
+  hosts: localhost
+  gather_facts: no
+  vars:
+    semaphore_url: "https://ansible.cloudigan.net"
+    semaphore_token: "{{ lookup('env', 'SEMAPHORE_API_TOKEN') }}"
+    inventory_file: "../inventory/production-hosts.ini"
+    inventory_name: "Production Hosts"
+    project_id: 1
+
+  tasks:
+    - name: Read inventory file
+      slurp:
+        src: "{{ inventory_file }}"
+      register: inventory_content
+
+    - name: Get existing inventories
+      uri:
+        url: "{{ semaphore_url }}/api/project/{{ project_id }}/inventory"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ semaphore_token }}"
+        validate_certs: yes
+      register: inventories
+
+    - name: Find Production Hosts inventory ID
+      set_fact:
+        inventory_id: "{{ item.id }}"
+      loop: "{{ inventories.json }}"
+      when: item.name == inventory_name
+      no_log: true
+
+    - name: Update inventory
+      uri:
+        url: "{{ semaphore_url }}/api/project/{{ project_id }}/inventory/{{ inventory_id }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ semaphore_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "{{ inventory_name }}"
+          project_id: "{{ project_id }}"
+          inventory: "{{ inventory_content.content | b64decode }}"
+          ssh_key_id: 1
+          type: "static"
+        validate_certs: yes
+        status_code: 204
+      register: update_result
+
+    - name: Inventory sync complete
+      debug:
+        msg: "Successfully updated Semaphore inventory '{{ inventory_name }}' with {{ inventory_content.content | b64decode | regex_findall('ansible_host=') | length }} hosts"

@@ -1,0 +1,11 @@
+{
+  "name": "Sync Inventory",
+  "description": "Update Semaphore inventory from production-hosts.ini file generated from Proxmox",
+  "playbook": "playbooks/sync-inventory.yml",
+  "inventory_id": 1,
+  "repository_id": 1,
+  "environment_id": 1,
+  "view_id": 1,
+  "app": "ansible",
+  "survey_vars": []
+}
