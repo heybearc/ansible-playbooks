@@ -263,7 +263,21 @@
       
     - name: Add Wix DNS CNAME record
       shell: |
-        echo "Wix DNS CNAME creation for {{ container_domain }} -> cloudigan.net"
+        python3 << 'PYTHON_EOF'
+        import os
+        import sys
+        
+        # Extract subdomain from FQDN
+        domain = "{{ container_domain }}"
+        if domain.endswith('.cloudigan.net'):
+            subdomain = domain.replace('.cloudigan.net', '')
+            print(f"Creating CNAME: {subdomain}.cloudigan.net -> cloudigan.net")
+            # TODO: Integrate with Wix MCP server
+            # For now, just log the intent
+            print(f"Wix CNAME would be created here")
+        else:
+            print(f"Domain {domain} is not under cloudigan.net, skipping Wix DNS")
+        PYTHON_EOF
       when: 
         - container_domain is defined
         - container_domain.endswith('.cloudigan.net')
