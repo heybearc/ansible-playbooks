@@ -188,7 +188,8 @@ def create_template_from_playbook(
         "environment_id": environment['id'],
         "allow_override_args_in_task": metadata.get('allow_override_args', False),
         "suppress_success_alerts": False,  # We want Teams notifications
-        "type": "task"  # Can be: task, build, deploy
+        "type": "",  # Empty string for Ansible playbook type
+        "app": ""    # Empty string for Ansible
     }
     
     # Create the template
