@@ -55,6 +55,11 @@ PLAYBOOK_METADATA = {
         "name": "PostgreSQL Status",
         "description": "Check database cluster health and replication",
         "allow_override_args": False
+    },
+    "sync-inventory.yml": {
+        "name": "Sync Inventory",
+        "description": "Update Semaphore inventory from production-hosts.ini generated from Proxmox",
+        "allow_override_args": False
     }
 }
 
