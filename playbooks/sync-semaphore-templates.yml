@@ -5,10 +5,10 @@
   gather_facts: no
   
   vars:
-    semaphore_url: "{{ lookup('env', 'SEMAPHORE_URL') | default('https://ansible.cloudigan.net', true) }}"
-    semaphore_user: "{{ lookup('env', 'SEMAPHORE_USER') | default('admin', true) }}"
-    semaphore_password: "{{ lookup('env', 'SEMAPHORE_PASSWORD') }}"
-    semaphore_project_id: "{{ lookup('env', 'SEMAPHORE_PROJECT_ID') | default('1', true) }}"
+    semaphore_url: "{{ semaphore_url | default('https://ansible.cloudigan.net') }}"
+    semaphore_user: "{{ semaphore_user | default('admin') }}"
+    semaphore_password: "{{ semaphore_password | default('') }}"
+    semaphore_project_id: "{{ semaphore_project_id | default('1') }}"
     github_repo: "heybearc/ansible-playbooks"
     
   tasks:
