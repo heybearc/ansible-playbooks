@@ -1,6 +1,6 @@
 ---
-- name: Health Check - Verify system health across all hosts (calibre-web)
-  hosts: calibre-web
+- name: Health Check - Verify system health across all hosts (raw module)
+  hosts: calibre-web,truenas
   gather_facts: no
   
   tasks:
@@ -40,7 +40,7 @@
         - disk_usage.stdout | trim | int > 80
 
 - name: Health Check - Verify system health across all hosts (standard)
-  hosts: all:!calibre-web
+  hosts: all:!calibre-web:!truenas
   gather_facts: no
   
   tasks:
