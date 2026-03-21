@@ -150,9 +150,9 @@ def create_template_from_playbook(
         print(f"⚠️  No metadata for {playbook_name}, skipping")
         return None
     
-    # Find the ansible-playbooks repository
+    # Find the Ansible Playbooks repository
     repo = next(
-        (r for r in resources['repositories'] if 'ansible-playbooks' in r.get('name', '').lower()),
+        (r for r in resources['repositories'] if 'ansible' in r.get('name', '').lower() and 'playbook' in r.get('name', '').lower()),
         None
     )
     if not repo:
