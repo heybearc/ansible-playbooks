@@ -82,11 +82,11 @@
         method: PUT
         body_format: json
         body:
-          id: "{{ inventory_id | int }}"
+          id: {{ inventory_id | int }}
           name: "Production Hosts"
-          project_id: "{{ semaphore_project_id | default('1') | int }}"
+          project_id: {{ semaphore_project_id | default('1') | int }}
           inventory: "{{ inventory_content.content | b64decode }}"
-          ssh_key_id: "{{ ssh_key_id | int }}"
+          ssh_key_id: {{ ssh_key_id | int }}
           type: "static"
         validate_certs: yes
         status_code: 204
