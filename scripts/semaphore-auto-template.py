@@ -187,9 +187,8 @@ def create_template_from_playbook(
         "repository_id": repo['id'],
         "environment_id": environment['id'],
         "allow_override_args_in_task": metadata.get('allow_override_args', False),
-        "suppress_success_alerts": False,  # We want Teams notifications
-        "type": "",  # Empty string for Ansible playbook type
-        "app": ""    # Empty string for Ansible
+        "suppress_success_alerts": False  # We want Teams notifications
+        # Note: Do not set 'type' or 'app' fields - let Semaphore default to TASK
     }
     
     # Create the template
