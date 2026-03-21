@@ -1,0 +1,39 @@
+---
+- name: Distribute Semaphore SSH key to unreachable hosts
+  hosts: localhost
+  gather_facts: no
+  vars:
+    semaphore_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGBIz9OJnufp1AteqlHjrsia+nl9roQGyccZWQccRzHY cory@homelab"
+    unreachable_hosts:
+      - { name: "nginx-proxy", ctid: "121" }
+      - { name: "adguard", ctid: "140" }
+      - { name: "scrypted", ctid: "180" }
+      - { name: "netbox", ctid: "141" }
+      - { name: "ansible-control", ctid: "183" }
+      - { name: "cloudigan-api-blue", ctid: "181" }
+      - { name: "cloudigan-api-green", ctid: "182" }
+      - { name: "readarr", ctid: "120" }
+      - { name: "prowlarr", ctid: "123" }
+      - { name: "radarr", ctid: "124" }
+      - { name: "sonarr", ctid: "125" }
+      - { name: "sabnzbd", ctid: "127" }
+      - { name: "plex", ctid: "128" }
+      - { name: "calibre-web", ctid: "129" }
+
+  tasks:
+    - name: Add Semaphore SSH key to LXC containers via Proxmox
+      shell: |
+        ssh prox "pct exec {{ item.ctid }} -- bash -c 'mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo \"{{ semaphore_pubkey }}\" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys'"
+      loop: "{{ unreachable_hosts }}"
+      register: key_distribution
+      ignore_errors: yes
+
+    - name: Add Semaphore SSH key to TrueNAS
+      shell: |
+        ssh truenas "mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo '{{ semaphore_pubkey }}' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys"
+      ignore_errors: yes
+      register: truenas_result
+
+    - name: Display results
+      debug:
+        msg: "SSH key distribution complete. Check individual host results above."
