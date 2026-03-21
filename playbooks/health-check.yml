@@ -5,17 +5,17 @@
   
   tasks:
     - name: Check disk usage
-      shell: df -h / | tail -1 | awk "{print \}" | sed "s/%//"
+      shell: df -h / | tail -1 | awk '{print $5}' | sed 's/%//'
       register: disk_usage
       changed_when: false
       
     - name: Check memory usage
-      shell: free | grep Mem | awk "{printf \"%.0f\", \/\ * 100}"
+      shell: free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}'
       register: memory_usage
       changed_when: false
       
     - name: Check CPU load
-      shell: uptime | awk -F"load average:" "{print \}" | awk "{print \}" | sed "s/,//"
+      shell: uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//'
       register: cpu_load
       changed_when: false
       
