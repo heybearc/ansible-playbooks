@@ -5,11 +5,20 @@
   gather_facts: yes
   
   tasks:
+    - name: Wait for dpkg lock to be released
+      shell: while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 1; done
+      changed_when: false
+      when: ansible_os_family == "Debian"
+      
     - name: Update apt cache (Debian/Ubuntu)
       apt:
         update_cache: yes
         cache_valid_time: 3600
       when: ansible_os_family == "Debian"
+      retries: 3
+      delay: 10
+      register: apt_update
+      until: apt_update is success
       
     - name: Upgrade all packages (Debian/Ubuntu)
       apt:
@@ -18,6 +27,9 @@
         autoclean: yes
       when: ansible_os_family == "Debian"
       register: apt_upgrade
+      retries: 3
+      delay: 10
+      until: apt_upgrade is success
       
     - name: Check if reboot is required
       stat:
