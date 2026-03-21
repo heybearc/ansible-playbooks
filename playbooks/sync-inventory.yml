@@ -68,6 +68,14 @@
         ssh_key_id: "{{ ssh_keys.json[0].id }}"
       when: ssh_keys.json | length > 0
 
+    - name: Debug - Show what we're sending
+      debug:
+        msg:
+          - "Inventory ID: {{ inventory_id }}"
+          - "SSH Key ID: {{ ssh_key_id }}"
+          - "Project ID: {{ semaphore_project_id | default('1') }}"
+          - "Inventory length: {{ (inventory_content.content | b64decode) | length }} chars"
+
     - name: Update inventory
       uri:
         url: "{{ semaphore_url | default('https://ansible.cloudigan.net') }}/api/project/{{ semaphore_project_id | default('1') }}/inventory/{{ inventory_id }}"
