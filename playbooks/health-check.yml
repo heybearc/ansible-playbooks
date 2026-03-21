@@ -1,23 +1,81 @@
 ---
-- name: Health Check - Verify system health across all hosts
-  hosts: all
-  gather_facts: yes
+- name: Health Check - Verify system health across all hosts (calibre-web)
+  hosts: calibre-web
+  gather_facts: no
+  
+  tasks:
+    - name: Check disk usage (raw)
+      raw: /usr/bin/df -h / | /usr/bin/tail -1 | /usr/bin/awk '{print $5}' | /usr/bin/sed 's/%//'
+      register: disk_usage
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Check memory usage (raw)
+      raw: /usr/bin/free | /usr/bin/grep Mem | /usr/bin/awk '{printf "%.0f", $3/$2 * 100}'
+      register: memory_usage
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Check CPU load (raw)
+      raw: /usr/bin/uptime | /usr/bin/awk -F'load average:' '{print $2}' | /usr/bin/awk '{print $1}' | /usr/bin/sed 's/,//'
+      register: cpu_load
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Display health status
+      debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Disk Usage: {{ disk_usage.stdout | default('N/A') | trim }}{% if disk_usage.stdout is defined %}%{% endif %}"
+          - "Memory Usage: {{ memory_usage.stdout | default('N/A') | trim }}{% if memory_usage.stdout is defined %}%{% endif %}"
+          - "CPU Load: {{ cpu_load.stdout | default('N/A') | trim }}"
+          - "PM2 Status: N/A"
+      when: disk_usage is defined or memory_usage is defined or cpu_load is defined
+      
+    - name: Alert if disk usage is high
+      debug:
+        msg: "WARNING: High disk usage ({{ disk_usage.stdout | trim }}%) on {{ inventory_hostname }}"
+      when: 
+        - disk_usage.stdout is defined
+        - disk_usage.stdout | trim | int > 80
+
+- name: Health Check - Verify system health across all hosts (standard)
+  hosts: all:!calibre-web
+  gather_facts: no
   
   tasks:
     - name: Check disk usage
-      shell: df -h / | tail -1 | awk '{print $5}' | sed 's/%//'
+      shell: |
+        if command -v df >/dev/null 2>&1; then
+          df -h / | tail -1 | awk '{print $5}' | sed 's/%//'
+        else
+          /usr/bin/df -h / | /usr/bin/tail -1 | /usr/bin/awk '{print $5}' | /usr/bin/sed 's/%//'
+        fi
       register: disk_usage
       changed_when: false
+      ignore_errors: yes
       
     - name: Check memory usage
-      shell: free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}'
+      shell: |
+        if command -v free >/dev/null 2>&1; then
+          free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}'
+        else
+          /usr/bin/free | /usr/bin/grep Mem | /usr/bin/awk '{printf "%.0f", $3/$2 * 100}'
+        fi
       register: memory_usage
       changed_when: false
+      ignore_errors: yes
       
     - name: Check CPU load
-      shell: uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//'
+      shell: |
+        if command -v uptime >/dev/null 2>&1; then
+          uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//'
+        else
+          /usr/bin/uptime | /usr/bin/awk -F'load average:' '{print $2}' | /usr/bin/awk '{print $1}' | /usr/bin/sed 's/,//'
+        fi
       register: cpu_load
       changed_when: false
+      ignore_errors: yes
       
     - name: Check if PM2 is running (Node.js apps)
       shell: systemctl is-active pm2-root || echo "not-running"
@@ -29,17 +87,22 @@
       debug:
         msg:
           - "Host: {{ inventory_hostname }}"
-          - "Disk Usage: {{ disk_usage.stdout }}%"
-          - "Memory Usage: {{ memory_usage.stdout }}%"
-          - "CPU Load: {{ cpu_load.stdout }}"
-          - "PM2 Status: {{ pm2_status.stdout }}"
-          
+          - "Disk Usage: {{ disk_usage.stdout | default('N/A') }}{% if disk_usage.stdout is defined %}%{% endif %}"
+          - "Memory Usage: {{ memory_usage.stdout | default('N/A') }}{% if memory_usage.stdout is defined %}%{% endif %}"
+          - "CPU Load: {{ cpu_load.stdout | default('N/A') }}"
+          - "PM2 Status: {{ pm2_status.stdout | default('N/A') }}"
+      when: disk_usage is defined or memory_usage is defined or cpu_load is defined
+      
     - name: Alert if disk usage is high
       debug:
         msg: "WARNING: High disk usage ({{ disk_usage.stdout }}%) on {{ inventory_hostname }}"
-      when: disk_usage.stdout | int > 80
+      when: 
+        - disk_usage.stdout is defined
+        - disk_usage.stdout | int > 80
       
     - name: Alert if memory usage is high
       debug:
         msg: "WARNING: High memory usage ({{ memory_usage.stdout }}%) on {{ inventory_hostname }}"
-      when: memory_usage.stdout | int > 90
+      when: 
+        - memory_usage.stdout is defined
+        - memory_usage.stdout | int > 90
