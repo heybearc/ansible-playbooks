@@ -68,30 +68,32 @@
         ssh_key_id: "{{ ssh_keys.json[0].id }}"
       when: ssh_keys.json | length > 0
 
-    - name: Build JSON body
-      set_fact:
-        json_body: |
-          {
+    - name: Write inventory to temp file
+      copy:
+        content: "{{ inventory_content.content | b64decode }}"
+        dest: /tmp/semaphore_inventory.txt
+
+    - name: Update inventory via curl
+      shell: |
+        curl -X PUT \
+          -H "Content-Type: application/json" \
+          -H "Cookie: {{ login_result.set_cookie }}" \
+          -d '{
             "id": {{ inventory_id | int }},
             "name": "Production Hosts",
             "project_id": {{ semaphore_project_id | default('1') | int }},
-            "inventory": {{ (inventory_content.content | b64decode) | to_json }},
+            "inventory": '"$(cat /tmp/semaphore_inventory.txt | jq -Rs .)"',
             "ssh_key_id": {{ ssh_key_id | int }},
             "type": "static"
-          }
-
-    - name: Update inventory
-      uri:
-        url: "{{ semaphore_url | default('https://ansible.cloudigan.net') }}/api/project/{{ semaphore_project_id | default('1') }}/inventory/{{ inventory_id }}"
-        method: PUT
-        body: "{{ json_body }}"
-        body_format: raw
-        validate_certs: yes
-        status_code: 204
-        headers:
-          Content-Type: "application/json"
-          Cookie: "{{ login_result.set_cookie }}"
+          }' \
+          "{{ semaphore_url | default('https://ansible.cloudigan.net') }}/api/project/{{ semaphore_project_id | default('1') }}/inventory/{{ inventory_id }}"
       register: update_result
+      changed_when: false
+
+    - name: Clean up temp file
+      file:
+        path: /tmp/semaphore_inventory.txt
+        state: absent
 
     - name: Inventory sync complete
       debug:
