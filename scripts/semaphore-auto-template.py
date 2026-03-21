@@ -58,8 +58,30 @@ PLAYBOOK_METADATA = {
     },
     "sync-inventory.yml": {
         "name": "Sync Inventory",
-        "description": "Update Semaphore inventory from production-hosts.ini generated from Proxmox",
-        "allow_override_args": False
+        "description": "Sync production hosts inventory from Proxmox to Semaphore",
+        "playbook": "sync-inventory.yml",
+        "inventory_id": None,
+        "repository_id": None,
+        "environment_id": None,
+        "view_id": None
+    },
+    "postgresql-failover.yml": {
+        "name": "PostgreSQL Failover",
+        "description": "Automatic PostgreSQL failover - Promote standby (CT151) to primary",
+        "playbook": "postgresql-failover.yml",
+        "inventory_id": None,
+        "repository_id": None,
+        "environment_id": None,
+        "view_id": None
+    },
+    "postgresql-rejoin-old-primary.yml": {
+        "name": "PostgreSQL Rejoin Old Primary",
+        "description": "Rejoin old primary (CT131) as new standby after failover",
+        "playbook": "postgresql-rejoin-old-primary.yml",
+        "inventory_id": None,
+        "repository_id": None,
+        "environment_id": None,
+        "view_id": None
     }
 }
 
