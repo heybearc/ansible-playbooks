@@ -351,9 +351,63 @@
       
     - name: Install node_exporter for monitoring
       shell: |
-        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'wget -q https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz && tar xzf node_exporter-1.7.0.linux-amd64.tar.gz && cp node_exporter-1.7.0.linux-amd64/node_exporter /usr/local/bin/ && rm -rf node_exporter-1.7.0* && useradd -rs /bin/false node_exporter'"
-        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'echo \"[Unit]\" > /etc/systemd/system/node_exporter.service && echo \"Description=Node Exporter\" >> /etc/systemd/system/node_exporter.service && echo \"After=network.target\" >> /etc/systemd/system/node_exporter.service && echo \"\" >> /etc/systemd/system/node_exporter.service && echo \"[Service]\" >> /etc/systemd/system/node_exporter.service && echo \"User=node_exporter\" >> /etc/systemd/system/node_exporter.service && echo \"Group=node_exporter\" >> /etc/systemd/system/node_exporter.service && echo \"Type=simple\" >> /etc/systemd/system/node_exporter.service && echo \"ExecStart=/usr/local/bin/node_exporter\" >> /etc/systemd/system/node_exporter.service && echo \"\" >> /etc/systemd/system/node_exporter.service && echo \"[Install]\" >> /etc/systemd/system/node_exporter.service && echo \"WantedBy=multi-user.target\" >> /etc/systemd/system/node_exporter.service'"
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'apt-get update -qq && apt-get install -y -qq wget tar unzip > /dev/null 2>&1'"
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'cd /tmp && wget -q https://github.com/prometheus/node_exporter/releases/download/v1.7.0/node_exporter-1.7.0.linux-amd64.tar.gz && tar xzf node_exporter-1.7.0.linux-amd64.tar.gz && mv node_exporter-1.7.0.linux-amd64/node_exporter /usr/local/bin/ && rm -rf node_exporter-1.7.0*'"
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'cat > /etc/systemd/system/node_exporter.service << \"EOFSERVICE\"
+        [Unit]
+        Description=Node Exporter
+        After=network.target
+        
+        [Service]
+        Type=simple
+        ExecStart=/usr/local/bin/node_exporter
+        Restart=always
+        
+        [Install]
+        WantedBy=multi-user.target
+        EOFSERVICE'"
         ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'systemctl daemon-reload && systemctl enable node_exporter && systemctl start node_exporter'"
+      when: skip_monitoring is not defined or not skip_monitoring
+      ignore_errors: yes
+      
+    - name: Install promtail for log shipping
+      shell: |
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'cd /tmp && wget -q https://github.com/grafana/loki/releases/download/v2.9.3/promtail-linux-amd64.zip && unzip -q promtail-linux-amd64.zip && mv promtail-linux-amd64 /usr/local/bin/promtail && chmod +x /usr/local/bin/promtail && rm promtail-linux-amd64.zip'"
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'mkdir -p /etc/promtail && cat > /etc/promtail/config.yml << \"EOFCONFIG\"
+        server:
+          http_listen_port: 9080
+          grpc_listen_port: 0
+        
+        positions:
+          filename: /tmp/positions.yaml
+        
+        clients:
+          - url: http://10.92.3.2:3100/loki/api/v1/push
+        
+        scrape_configs:
+          - job_name: system
+            static_configs:
+              - targets:
+                  - localhost
+                labels:
+                  job: varlogs
+                  host: {{ container_name }}
+                  __path__: /var/log/*log
+        EOFCONFIG'"
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'cat > /etc/systemd/system/promtail.service << \"EOFSERVICE\"
+        [Unit]
+        Description=Promtail
+        After=network.target
+        
+        [Service]
+        Type=simple
+        ExecStart=/usr/local/bin/promtail -config.file=/etc/promtail/config.yml
+        Restart=always
+        
+        [Install]
+        WantedBy=multi-user.target
+        EOFSERVICE'"
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'systemctl daemon-reload && systemctl enable promtail && systemctl start promtail'"
       when: skip_monitoring is not defined or not skip_monitoring
       ignore_errors: yes
       
@@ -394,7 +448,7 @@
           - "NPM Proxy: {{ 'Created' if (npm_create is defined and npm_create.status is defined and npm_create.status == 201) else ('Updated' if (npm_update is defined and npm_update.status is defined and npm_update.status == 200) else 'Skipped/Failed') }}"
           - "DNS (Internal): {{ 'Configured' if (skip_dns is not defined or not skip_dns) else 'Skipped' }}"
           - "DNS (Wix): Manual configuration required"
-          - "Monitoring: {{ 'Installed' if (skip_monitoring is not defined or not skip_monitoring) else 'Skipped' }}"
+          - "Monitoring: {{ 'Installed (node_exporter + promtail)' if (skip_monitoring is not defined or not skip_monitoring) else 'Skipped' }}"
           - "Backup: {{ 'Configured' if (skip_backup is not defined or not skip_backup) else 'Skipped' }}"
           - ""
           - "Access container: ssh root@{{ container_ip }}"
