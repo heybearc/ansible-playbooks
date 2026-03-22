@@ -21,10 +21,10 @@
     
     # Integration endpoints
     netbox_url: "http://10.92.3.18"
-    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+    netbox_token: "a7b0a8384c7c8c47f599d43731f1aa59f138c809"
     npm_url: "http://10.92.3.3:81"
-    npm_email: "admin@cloudigan.net"
-    npm_password: "{{ lookup('env', 'NPM_PASSWORD') }}"
+    npm_email: "admin@cloudigan.com"
+    npm_password: "HlZDa2@rd*mivNrl5kqQ"
     
     # CTID ranges by function
     ctid_ranges:
@@ -155,40 +155,185 @@
       when: skip_netbox is not defined or not skip_netbox
       ignore_errors: yes
       
-    - name: Register IP address in Netbox
+    - name: Check if VM exists in Netbox
       uri:
-        url: "{{ netbox_url }}/api/ipam/ip-addresses/"
+        url: "{{ netbox_url }}/api/virtualization/virtual-machines/?name={{ container_name }}"
+        method: GET
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        validate_certs: no
+      register: existing_vm
+      when: skip_netbox is not defined or not skip_netbox
+      ignore_errors: yes
+      
+    - name: Create VM in Netbox (if not exists)
+      uri:
+        url: "{{ netbox_url }}/api/virtualization/virtual-machines/"
         method: POST
         headers:
           Authorization: "Token {{ netbox_token }}"
           Content-Type: "application/json"
         body_format: json
         body:
-          address: "{{ container_ip }}/{{ subnet }}"
+          name: "{{ container_name }}"
           status: "active"
-          dns_name: "{{ container_name }}.{{ searchdomain }}"
-          description: "{{ container_function }} container - CT{{ container_ctid }}"
+          cluster: 1
+          site: 2
+          vcpus: "{{ container_cores }}"
+          memory: "{{ container_memory }}"
+          disk: "{{ container_disk }}"
+          comments: "MSP Platform - CT{{ container_ctid }} - {{ container_function }}"
         status_code: [201, 400]
         validate_certs: no
-      when: skip_netbox is not defined or not skip_netbox
+      when: 
+        - skip_netbox is not defined or not skip_netbox
+        - existing_vm is defined
+        - existing_vm.json.count == 0
+      register: netbox_create
       ignore_errors: yes
       
-    - name: Create NPM proxy host via SSH
-      shell: |
-        ssh npm "docker exec -i nginx-proxy-manager npm proxy add \
-          --domain {{ container_domain }} \
-          --forward-host {{ container_ip }} \
-          --forward-port {{ container_port | default(80) }} \
-          --forward-scheme {{ 'https' if container_ssl | default(false) else 'http' }} \
-          --block-exploits true \
-          --websocket-support true \
-          --http2-support true \
-          {{ '--ssl-forced true --certificate-id 1' if container_ssl | default(false) else '' }}"
-      when: 
+    - name: Update existing VM in Netbox
+      uri:
+        url: "{{ netbox_url }}/api/virtualization/virtual-machines/{{ existing_vm.json.results[0].id }}/"
+        method: PATCH
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          vcpus: "{{ container_cores }}"
+          memory: "{{ container_memory }}"
+          disk: "{{ container_disk }}"
+          comments: "MSP Platform - CT{{ container_ctid }} - {{ container_function }}"
+        status_code: 200
+        validate_certs: no
+      when:
+        - skip_netbox is not defined or not skip_netbox
+        - existing_vm is defined
+        - existing_vm.json.count > 0
+      register: netbox_update
+      ignore_errors: yes
+      
+    - name: Login to NPM
+      uri:
+        url: "{{ npm_url }}/api/tokens"
+        method: POST
+        body_format: json
+        body:
+          identity: "{{ npm_email }}"
+          secret: "{{ npm_password }}"
+        status_code: 200
+        validate_certs: no
+      register: npm_login
+      when:
         - container_domain is defined
         - skip_npm is not defined or not skip_npm
       ignore_errors: yes
-      register: npm_result
+      
+    - name: Check if NPM proxy exists
+      uri:
+        url: "{{ npm_url }}/api/nginx/proxy-hosts"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ npm_login.json.token }}"
+        validate_certs: no
+      register: existing_proxies
+      when:
+        - container_domain is defined
+        - skip_npm is not defined or not skip_npm
+        - npm_login is defined
+        - npm_login.json is defined
+        - npm_login.json.token is defined
+      ignore_errors: yes
+      
+    - name: Find existing proxy for domain
+      set_fact:
+        existing_proxy: "{{ existing_proxies.json | selectattr('domain_names', 'contains', container_domain) | list | first | default(none) }}"
+      when:
+        - container_domain is defined
+        - skip_npm is not defined or not skip_npm
+        - existing_proxies is defined
+        - existing_proxies.json is defined
+      ignore_errors: yes
+      
+    - name: Create NPM proxy host (if not exists)
+      uri:
+        url: "{{ npm_url }}/api/nginx/proxy-hosts"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ npm_login.json.token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          domain_names:
+            - "{{ container_domain }}"
+          forward_scheme: "{{ 'https' if container_ssl | default(false) else 'http' }}"
+          forward_host: "{{ container_ip }}"
+          forward_port: "{{ container_port | default(80) }}"
+          access_list_id: 0
+          certificate_id: 0
+          ssl_forced: false
+          caching_enabled: false
+          block_exploits: true
+          advanced_config: ""
+          meta:
+            letsencrypt_agree: false
+            dns_challenge: false
+          allow_websocket_upgrade: true
+          http2_support: true
+          hsts_enabled: false
+          hsts_subdomains: false
+        status_code: [201, 400]
+        validate_certs: no
+      when:
+        - container_domain is defined
+        - skip_npm is not defined or not skip_npm
+        - npm_login is defined
+        - npm_login.json is defined
+        - npm_login.json.token is defined
+        - existing_proxy is not defined or existing_proxy is none
+      register: npm_create
+      ignore_errors: yes
+      
+    - name: Update NPM proxy host (if exists)
+      uri:
+        url: "{{ npm_url }}/api/nginx/proxy-hosts/{{ existing_proxy.id }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ npm_login.json.token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          domain_names:
+            - "{{ container_domain }}"
+          forward_scheme: "{{ 'https' if container_ssl | default(false) else 'http' }}"
+          forward_host: "{{ container_ip }}"
+          forward_port: "{{ container_port | default(80) }}"
+          access_list_id: 0
+          certificate_id: 0
+          ssl_forced: false
+          caching_enabled: false
+          block_exploits: true
+          advanced_config: ""
+          meta:
+            letsencrypt_agree: false
+            dns_challenge: false
+          allow_websocket_upgrade: true
+          http2_support: true
+          hsts_enabled: false
+          hsts_subdomains: false
+        status_code: 200
+        validate_certs: no
+      when:
+        - container_domain is defined
+        - skip_npm is not defined or not skip_npm
+        - npm_login is defined
+        - npm_login.json is defined
+        - npm_login.json.token is defined
+        - existing_proxy is defined
+        - existing_proxy is not none
+      register: npm_update
+      ignore_errors: yes
       
     - name: Add internal DNS record to Windows DC-01
       shell: |
@@ -223,23 +368,14 @@
       when: skip_backup is not defined or not skip_backup
       ignore_errors: yes
       
-    - name: Add Wix DNS CNAME record
-      shell: |
-        python3 << 'PYTHON_EOF'
-        import os
-        import sys
-        
-        # Extract subdomain from FQDN
-        domain = "{{ container_domain }}"
-        if domain.endswith('.cloudigan.net'):
-            subdomain = domain.replace('.cloudigan.net', '')
-            print(f"Creating CNAME: {subdomain}.cloudigan.net -> cloudigan.net")
-            # TODO: Integrate with Wix MCP server
-            # For now, just log the intent
-            print(f"Wix CNAME would be created here")
-        else:
-            print(f"Domain {domain} is not under cloudigan.net, skipping Wix DNS")
-        PYTHON_EOF
+    - name: Display Wix DNS CNAME instruction
+      debug:
+        msg:
+          - "=== Manual Wix DNS Configuration Required ==="
+          - "Please create CNAME record in Wix DNS:"
+          - "  Subdomain: {{ container_domain.split('.')[0] }}"
+          - "  Points to: cloudigan.net"
+          - "  Example: {{ container_domain }} -> cloudigan.net"
       when: 
         - container_domain is defined
         - container_domain.endswith('.cloudigan.net')
@@ -254,12 +390,12 @@
           - "Container: {{ container_name }} (CT{{ container_ctid }})"
           - "IP Address: {{ container_ip }}"
           - "Status: Running"
-          - "Netbox: {{ 'Registered' if (netbox_result is defined and netbox_result.status is defined and netbox_result.status == 201) else 'Skipped/Failed' }}"
-          - "NPM Proxy: {{ 'Created' if (npm_result is defined and npm_result.status is defined and npm_result.status == 201) else 'Skipped/Not Configured' }}"
+          - "Netbox: {{ 'Created' if (netbox_create is defined and netbox_create.status is defined and netbox_create.status == 201) else ('Updated' if (netbox_update is defined and netbox_update.status is defined and netbox_update.status == 200) else 'Skipped/Failed') }}"
+          - "NPM Proxy: {{ 'Created' if (npm_create is defined and npm_create.status is defined and npm_create.status == 201) else ('Updated' if (npm_update is defined and npm_update.status is defined and npm_update.status == 200) else 'Skipped/Failed') }}"
           - "DNS (Internal): {{ 'Configured' if (skip_dns is not defined or not skip_dns) else 'Skipped' }}"
-          - "DNS (Wix): {{ 'Configured' if wix_dns_result is defined else 'Skipped' }}"
+          - "DNS (Wix): Manual configuration required"
           - "Monitoring: {{ 'Installed' if (skip_monitoring is not defined or not skip_monitoring) else 'Skipped' }}"
           - "Backup: {{ 'Configured' if (skip_backup is not defined or not skip_backup) else 'Skipped' }}"
           - ""
           - "Access container: ssh root@{{ container_ip }}"
-          - "{% if container_domain is defined %}Web UI: https://{{ container_domain }}{% endif %}"
+          - "{% if container_domain is defined %}Web UI: http://{{ container_domain }}{% endif %}"
