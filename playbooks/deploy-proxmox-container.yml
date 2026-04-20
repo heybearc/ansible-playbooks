@@ -411,6 +411,12 @@
       when: skip_monitoring is not defined or not skip_monitoring
       ignore_errors: yes
       
+    - name: Distribute SSH keys to new container
+      shell: |
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'mkdir -p /root/.ssh && chmod 700 /root/.ssh'"
+        ssh {{ proxmox_host }} "pct exec {{ container_ctid }} -- bash -c 'echo \"{{ ssh_pubkey | default('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGBIz9OJnufp1AteqlHjrsia+nl9roQGyccZWQccRzHY cory@homelab') }}\" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys'"
+      ignore_errors: yes
+
     - name: Configure Proxmox backup
       shell: |
         ssh {{ proxmox_host }} "pvesh create /cluster/backup --vmid {{ container_ctid }} \
