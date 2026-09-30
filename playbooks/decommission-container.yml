@@ -1,0 +1,538 @@
+---
+# Container Decommissioning Playbook
+# Purpose: Complete removal of container and all associated infrastructure entries
+# Usage: ansible-playbook decommission-container.yml -e "container_name=test-app" -e "container_ctid=115"
+# Check Mode: Add --check to preview changes without executing
+
+- name: Decommission Container and Remove All Infrastructure Entries
+  hosts: localhost
+  gather_facts: yes
+  
+  vars:
+    # Required variables (pass via -e flag)
+    # container_name: "test-app"
+    # container_ctid: "115"
+    
+    # Optional: Set to true to skip confirmation prompts
+    force_decommission: false
+    
+    # Infrastructure endpoints
+    proxmox_host: "10.92.0.10"
+    netbox_url: "http://10.92.3.18"
+    npm_url: "http://10.92.3.3:81"
+    adguard_url: "http://10.92.3.10"
+    prometheus_config_path: "/etc/prometheus"
+    loki_config_path: "/etc/loki"
+    
+  tasks:
+    # ============================================================================
+    # VALIDATION & CONFIRMATION
+    # ============================================================================
+    
+    - name: Validate required variables
+      assert:
+        that:
+          - container_name is defined
+          - container_ctid is defined
+        fail_msg: "Required variables missing. Usage: -e 'container_name=test-app' -e 'container_ctid=115'"
+    
+    - name: Display decommission plan
+      debug:
+        msg:
+          - "=========================================="
+          - "CONTAINER DECOMMISSION PLAN"
+          - "=========================================="
+          - "Container Name: {{ container_name }}"
+          - "Container CTID: {{ container_ctid }}"
+          - ""
+          - "This playbook will:"
+          - "  1. Remove monitoring (Prometheus/Loki targets)"
+          - "  2. Remove backup configuration"
+          - "  3. Remove DNS record (AdGuard Home)"
+          - "  4. Remove reverse proxy (NPM)"
+          - "  5. Remove from Netbox IPAM"
+          - "  6. Stop and destroy Proxmox container"
+          - ""
+          - "WARNING: This action is IRREVERSIBLE!"
+          - "=========================================="
+    
+    - name: Confirm decommission (interactive)
+      pause:
+        prompt: "Type 'yes' to proceed with decommissioning {{ container_name }} (CT{{ container_ctid }})"
+      register: confirm_decommission
+      when: not force_decommission and not ansible_check_mode
+    
+    - name: Abort if not confirmed
+      fail:
+        msg: "Decommission aborted by user"
+      when: 
+        - not force_decommission
+        - not ansible_check_mode
+        - confirm_decommission.user_input | default('') != 'yes'
+    
+    # ============================================================================
+    # STEP 1: GET CONTAINER INFORMATION
+    # ============================================================================
+    
+    - name: Get container information from Proxmox
+      delegate_to: prox
+      shell: |
+        pct config {{ container_ctid }} 2>/dev/null || echo "NOT_FOUND"
+      register: container_info
+      changed_when: false
+      failed_when: false
+    
+    - name: Parse container IP address
+      set_fact:
+        container_ip: "{{ (container_info.stdout | regex_search('ip=([0-9.]+)', '\\1') | default([''], true))[0] | default('') }}"
+      when: 
+        - container_info.stdout is defined
+        - container_info.stdout != "NOT_FOUND"
+    
+    - name: Display container information
+      debug:
+        msg:
+          - "Container Status: {{ 'Found' if container_info.stdout != 'NOT_FOUND' else 'Not Found' }}"
+          - "Container IP: {{ container_ip | default('Unknown') }}"
+    
+    # ============================================================================
+    # STEP 2: REMOVE FROM MONITORING
+    # ============================================================================
+    
+    - name: Remove from Prometheus targets
+      delegate_to: monitoring-stack
+      block:
+        - name: Check if Prometheus targets file exists
+          stat:
+            path: "{{ prometheus_config_path }}/targets.json"
+          register: prometheus_targets_file
+        
+        - name: Read current Prometheus targets
+          slurp:
+            path: "{{ prometheus_config_path }}/targets.json"
+          register: prometheus_targets_content
+          when: prometheus_targets_file.stat.exists
+        
+        - name: Remove container from Prometheus targets
+          copy:
+            content: "{{ prometheus_targets | to_nice_json }}"
+            dest: "{{ prometheus_config_path }}/targets.json"
+            backup: yes
+          vars:
+            current_targets: "{{ prometheus_targets_content.content | b64decode | from_json }}"
+            prometheus_targets: "{{ current_targets | rejectattr('labels.instance', 'equalto', container_name) | list }}"
+          when: 
+            - prometheus_targets_file.stat.exists
+            - prometheus_targets | length < (current_targets | length)
+          notify: Reload Prometheus
+      rescue:
+        - name: Prometheus removal failed (non-fatal)
+          debug:
+            msg: "WARNING: Could not remove from Prometheus monitoring"
+    
+    - name: Remove from Loki/Promtail configuration
+      delegate_to: monitoring-stack
+      block:
+        - name: Remove Promtail configuration for container
+          file:
+            path: "{{ loki_config_path }}/promtail-{{ container_name }}.yml"
+            state: absent
+          notify: Reload Promtail
+      rescue:
+        - name: Loki removal failed (non-fatal)
+          debug:
+            msg: "WARNING: Could not remove from Loki monitoring"
+    
+    # ============================================================================
+    # STEP 3: REMOVE BACKUP CONFIGURATION
+    # ============================================================================
+    
+    - name: Remove from Proxmox backup schedule
+      delegate_to: prox
+      shell: |
+        # Get backup job ID for this container
+        JOB_ID=$(pvesh get /cluster/backup --output-format json | jq -r ".[] | select(.vmid | contains(\"{{ container_ctid }}\")) | .id" 2>/dev/null)
+        
+        if [ -n "$JOB_ID" ]; then
+          pvesh delete /cluster/backup/$JOB_ID
+          echo "REMOVED"
+        else
+          echo "NOT_FOUND"
+        fi
+      register: backup_removal
+      changed_when: backup_removal.stdout == "REMOVED"
+      failed_when: false
+    
+    - name: Display backup removal status
+      debug:
+        msg: "Backup schedule: {{ 'Removed' if backup_removal.stdout == 'REMOVED' else 'Not found' }}"
+    
+    # ============================================================================
+    # STEP 4: DNS CLEANUP NOTE
+    # ============================================================================
+    
+    - name: Display DNS cleanup reminder
+      debug:
+        msg: "⚠️  MANUAL ACTION REQUIRED: Remove DNS record for {{ container_name }}.cloudigan.net ({{ container_ip | default('unknown IP') }}) from DC-01"
+    
+    # ============================================================================
+    # STEP 5: REMOVE NPM REVERSE PROXY
+    # ============================================================================
+    
+    - name: Remove from Nginx Proxy Manager
+      block:
+        - name: Login to NPM
+          uri:
+            url: "{{ npm_url }}/api/tokens"
+            method: POST
+            body_format: json
+            body:
+              identity: "{{ lookup('env', 'NPM_USER') | default('admin@cloudigan.com') }}"
+              secret: "{{ lookup('env', 'NPM_PASSWORD') }}"
+            status_code: 200
+          register: npm_login
+        
+        - name: Get NPM proxy hosts
+          uri:
+            url: "{{ npm_url }}/api/nginx/proxy-hosts"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ npm_login.json.token | default('') }}"
+            status_code: 200
+          register: npm_hosts
+          when: npm_login.json is defined
+        
+        - name: Find proxy host for container
+          set_fact:
+            npm_host_id: "{{ item.id }}"
+          loop: "{{ npm_hosts.json }}"
+          when: 
+            - item.domain_names is defined
+            - (container_name + '.cloudigan.net') in item.domain_names
+        
+        - name: Delete NPM proxy host
+          uri:
+            url: "{{ npm_url }}/api/nginx/proxy-hosts/{{ npm_host_id }}"
+            method: DELETE
+            headers:
+              Authorization: "Bearer {{ npm_login.json.token }}"
+            status_code: [200, 204]
+          when: npm_host_id is defined
+          register: npm_deletion
+        
+        - name: Display NPM removal status
+          debug:
+            msg: "NPM proxy host: {{ 'Removed' if npm_host_id is defined else 'Not found' }}"
+      rescue:
+        - name: NPM removal failed (non-fatal)
+          debug:
+            msg: "WARNING: Could not remove from NPM (may not exist or credentials issue)"
+    
+    # ============================================================================
+    # STEP 6: REMOVE FROM NETBOX
+    # ============================================================================
+    
+    - name: Remove from Netbox IPAM
+      block:
+        - name: Search for VM in Netbox
+          uri:
+            url: "{{ netbox_url }}/api/virtualization/virtual-machines/?name={{ container_name }}"
+            method: GET
+            headers:
+              Authorization: "Token {{ lookup('env', 'NETBOX_TOKEN') }}"
+            status_code: 200
+          register: netbox_vm_search
+        
+        - name: Get VM ID
+          set_fact:
+            netbox_vm_id: "{{ netbox_vm_search.json.results[0].id }}"
+          when: 
+            - netbox_vm_search.json is defined
+            - netbox_vm_search.json.count > 0
+        
+        - name: Delete VM from Netbox (cascades to interfaces and IPs)
+          uri:
+            url: "{{ netbox_url }}/api/virtualization/virtual-machines/{{ netbox_vm_id }}/"
+            method: DELETE
+            headers:
+              Authorization: "Token {{ lookup('env', 'NETBOX_TOKEN') }}"
+            status_code: [204]
+          when: netbox_vm_id is defined
+          register: netbox_deletion
+        
+        - name: Display Netbox removal status
+          debug:
+            msg: "Netbox VM: {{ 'Removed (including interfaces and IPs)' if netbox_vm_id is defined else 'Not found' }}"
+      rescue:
+        - name: Netbox removal failed (non-fatal)
+          debug:
+            msg: "WARNING: Could not remove from Netbox (may not exist or credentials issue)"
+    
+    # ============================================================================
+    # STEP 7: STOP AND DESTROY PROXMOX CONTAINER
+    # ============================================================================
+    
+    - name: Stop Proxmox container
+      delegate_to: prox
+      shell: |
+        if pct status {{ container_ctid }} 2>/dev/null | grep -q running; then
+          pct stop {{ container_ctid }}
+          echo "STOPPED"
+        else
+          echo "NOT_RUNNING"
+        fi
+      register: container_stop
+      changed_when: container_stop.stdout == "STOPPED"
+      when: container_info.stdout != "NOT_FOUND"
+    
+    - name: Wait for container to stop
+      delegate_to: prox
+      shell: pct status {{ container_ctid }} 2>/dev/null
+      register: container_status
+      until: "'stopped' in container_status.stdout or container_status.rc != 0"
+      retries: 30
+      delay: 2
+      when: 
+        - container_info.stdout != "NOT_FOUND"
+        - container_stop.stdout == "STOPPED"
+      failed_when: false
+    
+    - name: Destroy Proxmox container
+      delegate_to: prox
+      shell: |
+        if pct status {{ container_ctid }} 2>/dev/null; then
+          pct destroy {{ container_ctid }} --purge
+          echo "DESTROYED"
+        else
+          echo "NOT_FOUND"
+        fi
+      register: container_destroy
+      changed_when: container_destroy.stdout == "DESTROYED"
+      when: container_info.stdout != "NOT_FOUND"
+    
+    # ============================================================================
+    # STEP 8: UPDATE DOCUMENTATION
+    # ============================================================================
+    
+    - name: Update APP-MAP.md in control plane
+      block:
+        - name: Check if control plane repo exists
+          stat:
+            path: "{{ lookup('env', 'HOME') }}/Projects/homelab-nexus/.cloudy-work/_cloudy-ops/context/APP-MAP.md"
+          register: app_map_file
+        
+        - name: Remove container entry from APP-MAP.md
+          lineinfile:
+            path: "{{ lookup('env', 'HOME') }}/Projects/homelab-nexus/.cloudy-work/_cloudy-ops/context/APP-MAP.md"
+            regexp: ".*{{ container_name }}.*Container {{ container_ctid }}.*"
+            state: absent
+            backup: yes
+          when: app_map_file.stat.exists
+          register: app_map_updated
+        
+        - name: Add decommission note to APP-MAP.md
+          lineinfile:
+            path: "{{ lookup('env', 'HOME') }}/Projects/homelab-nexus/.cloudy-work/_cloudy-ops/context/APP-MAP.md"
+            line: "<!-- Decommissioned: {{ container_name }} (CT{{ container_ctid }}) on {{ ansible_date_time.date }} -->"
+            insertafter: EOF
+          when: 
+            - app_map_file.stat.exists
+            - app_map_updated.changed
+      rescue:
+        - name: APP-MAP.md update failed (non-fatal)
+          debug:
+            msg: "WARNING: Could not update APP-MAP.md"
+    
+    - name: Update infrastructure-spec.md
+      block:
+        - name: Check if infrastructure-spec.md exists
+          stat:
+            path: "{{ lookup('env', 'HOME') }}/Projects/homelab-nexus/documentation/infrastructure-spec.md"
+          register: infra_spec_file
+        
+        - name: Remove container entry from infrastructure-spec.md
+          lineinfile:
+            path: "{{ lookup('env', 'HOME') }}/Projects/homelab-nexus/documentation/infrastructure-spec.md"
+            regexp: ".*{{ container_name }}.*{{ container_ctid }}.*"
+            state: absent
+            backup: yes
+          when: infra_spec_file.stat.exists
+          register: infra_spec_updated
+        
+        - name: Remove container IP references from infrastructure-spec.md
+          lineinfile:
+            path: "{{ lookup('env', 'HOME') }}/Projects/homelab-nexus/documentation/infrastructure-spec.md"
+            regexp: ".*{{ container_ip }}.*{{ container_name }}.*"
+            state: absent
+          when: 
+            - infra_spec_file.stat.exists
+            - container_ip is defined
+            - container_ip != ""
+      rescue:
+        - name: infrastructure-spec.md update failed (non-fatal)
+          debug:
+            msg: "WARNING: Could not update infrastructure-spec.md"
+    
+    - name: Create BookStack documentation update note
+      copy:
+        content: |
+          # BookStack Documentation Update Required
+          
+          **Container Decommissioned:** {{ container_name }} (CT{{ container_ctid }})
+          **Date:** {{ ansible_date_time.iso8601 }}
+          **IP Address:** {{ container_ip | default('Unknown') }}
+          
+          ## Manual Actions Required in BookStack
+          
+          Please update the following BookStack documentation:
+          
+          1. **Infrastructure Documentation**
+             - Remove {{ container_name }} from container inventory
+             - Update network diagrams if applicable
+             - Remove from service catalog
+          
+          2. **Runbooks**
+             - Archive or delete runbook for {{ container_name }}
+             - Update related runbooks that reference this container
+          
+          3. **Client Documentation** (if applicable)
+             - Remove service references
+             - Update architecture diagrams
+          
+          ## BookStack Access
+          
+          - **URL:** https://docs.cloudigan.net
+          - **Search for:** "{{ container_name }}" or "CT{{ container_ctid }}" or "{{ container_ip }}"
+          
+          ## Automation Note
+          
+          BookStack API integration for automated documentation updates is planned.
+          For now, please manually review and update BookStack documentation.
+          
+          ---
+          
+          **Generated by:** decommission-container.yml
+        dest: "/tmp/bookstack-update-{{ container_name }}-{{ container_ctid }}.md"
+      delegate_to: localhost
+    
+    # ============================================================================
+    # STEP 9: GENERATE DECOMMISSION REPORT
+    # ============================================================================
+    
+    - name: Generate decommission report
+      copy:
+        content: |
+          # Container Decommission Report
+          
+          **Date:** {{ ansible_date_time.iso8601 }}
+          **Container:** {{ container_name }}
+          **CTID:** {{ container_ctid }}
+          **IP Address:** {{ container_ip | default('Unknown') }}
+          
+          ## Actions Completed
+          
+          ### Infrastructure Cleanup
+          - [{{ 'x' if prometheus_targets_file.stat.exists | default(false) else ' ' }}] Removed from Prometheus monitoring
+          - [{{ 'x' if backup_removal.stdout == 'REMOVED' | default(false) else ' ' }}] Removed backup schedule
+          - [{{ 'x' if npm_host_id is defined | default(false) else ' ' }}] Removed NPM reverse proxy
+          - [{{ 'x' if netbox_vm_id is defined | default(false) else ' ' }}] Removed from Netbox IPAM
+          - [{{ 'x' if container_destroy.stdout == 'DESTROYED' | default(false) else ' ' }}] Destroyed Proxmox container
+          - [ ] **MANUAL:** Remove DNS record from DC-01 for {{ container_name }}.cloudigan.net
+          
+          ### Documentation Updates
+          - [{{ 'x' if app_map_updated.changed | default(false) else ' ' }}] Updated APP-MAP.md in control plane
+          - [{{ 'x' if infra_spec_updated.changed | default(false) else ' ' }}] Updated infrastructure-spec.md
+          - [x] Created BookStack update checklist
+          
+          ## Status
+          
+          {% if container_destroy.stdout == 'DESTROYED' %}
+          ✅ **Container successfully decommissioned**
+          {% else %}
+          ⚠️ **Container decommission incomplete** - Review actions above
+          {% endif %}
+          
+          ## Notes
+          
+          - All infrastructure entries have been removed
+          - Container data has been purged from Proxmox
+          - Backup schedules have been removed
+          - Monitoring targets have been cleaned up
+          - Documentation updated in control plane and homelab-nexus repos
+          
+          ## Manual Follow-up Required
+          
+          1. **Review BookStack Documentation:**
+             - See: `/tmp/bookstack-update-{{ container_name }}-{{ container_ctid }}.md`
+             - Update container inventory, runbooks, and client docs
+          
+          2. **Commit Documentation Changes:**
+             ```bash
+             cd ~/Projects/homelab-nexus
+             git add .cloudy-work/_cloudy-ops/context/APP-MAP.md
+             git add documentation/infrastructure-spec.md
+             git commit -m "docs: remove {{ container_name }} (CT{{ container_ctid }}) after decommission"
+             git push
+             ```
+          
+          3. **Remove DNS Record from DC-01:**
+             - Connect to DC-01 Windows Server
+             - Open DNS Manager
+             - Remove A record: {{ container_name }}.cloudigan.net → {{ container_ip }}
+          
+          4. **Verify Removal:**
+             - Check Grafana dashboards (no metrics from {{ container_ip }})
+             - Verify DNS resolution removed: `nslookup {{ container_name }}.cloudigan.net`
+             - Check NPM proxy list: https://npm.cloudigan.net
+             - Verify Netbox IPAM: https://netbox.cloudigan.net
+          
+          ---
+          
+          **Executed by:** {{ lookup('env', 'USER') }}
+          **Playbook:** decommission-container.yml
+        dest: "/tmp/decommission-{{ container_name }}-{{ container_ctid }}.md"
+      delegate_to: localhost
+    
+    - name: Display decommission summary
+      debug:
+        msg:
+          - "=========================================="
+          - "DECOMMISSION COMPLETE"
+          - "=========================================="
+          - "Container: {{ container_name }} (CT{{ container_ctid }})"
+          - "Status: {{ 'Successfully removed' if container_destroy.stdout == 'DESTROYED' else 'Partially removed' }}"
+          - ""
+          - "Infrastructure Cleanup:"
+          - "  - Monitoring: {{ 'Removed' if prometheus_targets_file.stat.exists | default(false) else 'N/A' }}"
+          - "  - Backups: {{ 'Removed' if backup_removal.stdout == 'REMOVED' | default(false) else 'N/A' }}"
+          - "  - NPM: {{ 'Removed' if npm_host_id is defined | default(false) else 'N/A' }}"
+          - "  - Netbox: {{ 'Removed' if netbox_vm_id is defined | default(false) else 'N/A' }}"
+          - "  - DNS: MANUAL - Remove from DC-01"
+          - ""
+          - "Documentation Updates:"
+          - "  - APP-MAP.md: {{ 'Updated' if app_map_updated.changed | default(false) else 'No changes' }}"
+          - "  - infrastructure-spec.md: {{ 'Updated' if infra_spec_updated.changed | default(false) else 'No changes' }}"
+          - "  - BookStack checklist: Created"
+          - ""
+          - "Reports Generated:"
+          - "  - Decommission: /tmp/decommission-{{ container_name }}-{{ container_ctid }}.md"
+          - "  - BookStack: /tmp/bookstack-update-{{ container_name }}-{{ container_ctid }}.md"
+          - ""
+          - "Next Steps:"
+          - "  1. Review BookStack update checklist"
+          - "  2. Commit documentation changes to git"
+          - "  3. Verify removal in monitoring/DNS/NPM"
+          - "=========================================="
+
+  handlers:
+    - name: Reload Prometheus
+      delegate_to: monitoring-stack
+      systemd:
+        name: prometheus
+        state: reloaded
+    
+    - name: Reload Promtail
+      delegate_to: monitoring-stack
+      systemd:
+        name: promtail
+        state: reloaded

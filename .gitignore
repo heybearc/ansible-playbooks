@@ -1,0 +1,9 @@
+
+# Control plane symlinks (created by setup script)
+.windsurf/workflows/*.md
+.windsurf/skills/*
+.windsurf/rules/*
+.cursor/commands/*.md
+.cursor/rules/*
+.cursor/skills/*
+.cursor/mcp.json

@@ -17,6 +17,7 @@
     default_memory: 4096
     default_cores: 2
     default_disk: 50
+    default_storage: truenas-proxmox
     default_bridge: "vmbr0"
     
     # Integration endpoints
@@ -55,7 +56,14 @@
         memory: "{{ vm_memory | default(default_memory) }}"
         cores: "{{ vm_cores | default(default_cores) }}"
         disk: "{{ vm_disk | default(default_disk) }}"
+        storage: "{{ vm_storage | default(default_storage) }}"
         bridge: "{{ vm_bridge | default(default_bridge) }}"
+
+    - name: Require TrueNAS datastore for new VMs (D-HOMELAB-014)
+      assert:
+        that:
+          - storage == 'truenas-proxmox'
+        fail_msg: "New VMs must use truenas-proxmox (got {{ storage }})."
         
     - name: Get list of existing VMIDs
       shell: ssh {{ proxmox_host }} "qm list | awk 'NR>1 {print $1}'"
@@ -92,6 +100,7 @@
           - "Memory: {{ memory }}MB"
           - "Cores: {{ cores }}"
           - "Disk: {{ disk }}GB"
+          - "Storage: {{ storage }}"
           - "{% if vm_iso is defined %}ISO: {{ vm_iso }}{% endif %}"
           - "{% if vm_template is defined %}Template: {{ vm_template }}{% endif %}"
     
@@ -103,7 +112,7 @@
           --cores {{ cores }} \
           --net0 virtio,bridge={{ bridge }} \
           --scsihw virtio-scsi-pci \
-          --scsi0 hdd-pool:{{ disk }} \
+          --scsi0 {{ storage }}:{{ disk }} \
           --ide2 {{ vm_iso }},media=cdrom \
           --boot order=scsi0;ide2 \
           --ostype l26 \
@@ -124,7 +133,7 @@
         ssh {{ proxmox_host }} "qm set {{ vm_id }} \
           --memory {{ memory }} \
           --cores {{ cores }} \
-          --scsi0 hdd-pool:{{ disk }}"
+          --scsi0 {{ storage }}:{{ disk }}"
       when: vm_template is defined
       
     - name: Configure VM network with cloud-init (if supported)

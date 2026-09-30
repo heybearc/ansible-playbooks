@@ -17,6 +17,7 @@
     default_memory: 2048
     default_cores: 2
     default_disk: 32
+    default_storage: truenas-proxmox
     default_template: "local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
     
     # Integration endpoints
@@ -58,8 +59,15 @@
         memory: "{{ container_memory | default(default_memory) }}"
         cores: "{{ container_cores | default(default_cores) }}"
         disk: "{{ container_disk | default(default_disk) }}"
+        storage: "{{ container_storage | default(default_storage) }}"
         template: "{{ container_template | default(default_template) }}"
         privileged: "{{ container_privileged | default(false) }}"
+
+    - name: Require TrueNAS datastore for new LXCs (D-HOMELAB-014)
+      assert:
+        that:
+          - storage == 'truenas-proxmox'
+        fail_msg: "New LXCs must use truenas-proxmox (got {{ storage }})."
         
     - name: Get list of existing CTIDs
       shell: ssh {{ proxmox_host }} "pct list | awk 'NR>1 {print $1}'"
@@ -96,6 +104,7 @@
           - "Memory: {{ memory }}MB"
           - "Cores: {{ cores }}"
           - "Disk: {{ disk }}GB"
+          - "Storage: {{ storage }}"
           - "Privileged: {{ privileged }}"
           - "Template: {{ template }}"
     
@@ -109,7 +118,8 @@
           --hostname {{ container_name }} \
           --memory {{ memory }} \
           --cores {{ cores }} \
-          --rootfs hdd-pool:{{ disk }} \
+          --storage {{ storage }} \
+          --rootfs {{ storage }}:{{ disk }} \
           --net0 name=eth0,bridge={{ bridge }},ip={{ container_ip }}/{{ subnet }},gw={{ gateway }} \
           --nameserver {{ nameserver }} \
           --searchdomain {{ searchdomain }} \

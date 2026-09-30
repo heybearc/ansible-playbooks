@@ -1,0 +1,22 @@
+---
+- name: Install coreutils on calibre-web container
+  hosts: calibre-web
+  gather_facts: no
+  
+  tasks:
+    - name: Update apt cache
+      raw: apt-get update
+      changed_when: false
+      
+    - name: Install coreutils package
+      raw: apt-get install -y coreutils
+      register: install_result
+      
+    - name: Verify coreutils installation
+      raw: df --version
+      register: verify_result
+      changed_when: false
+      
+    - name: Display installation result
+      debug:
+        msg: "{{ verify_result.stdout_lines }}"
